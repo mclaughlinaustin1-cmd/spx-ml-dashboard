@@ -31,15 +31,24 @@ try:
             st.error(f"No historical data found for ticker '{ticker}'. Try another ticker.")
         else:
             # --- CLEAN DATA ---
-            data = data.dropna(subset=['Close'])
+            # Pick Close or Adj Close
+            if 'Close' in data.columns:
+                price_col = 'Close'
+            elif 'Adj Close' in data.columns:
+                price_col = 'Adj Close'
+            else:
+                st.error("No Close/Adj Close column available. Cannot run prediction.")
+                st.stop()
+
+            data = data.dropna(subset=[price_col])
             if data.empty:
-                st.error(f"No valid closing price data found for '{ticker}'.")
+                st.error(f"No valid price data found for '{ticker}'.")
             else:
                 data['Date'] = data.index
                 data['Date_ordinal'] = pd.to_datetime(data['Date']).map(datetime.toordinal)
 
                 X = data[['Date_ordinal']]
-                y = data['Close']
+                y = data[price_col]
 
                 # --- SPLIT DATA ---
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
