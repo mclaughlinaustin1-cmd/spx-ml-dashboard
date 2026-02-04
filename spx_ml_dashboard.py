@@ -28,7 +28,7 @@ try:
             data = yf.download(ticker, start=start_date, end=end_date)
 
         if data.empty:
-            st.error("No data found for this ticker.")
+            st.error(f"No historical data found for ticker '{ticker}'. Try another ticker.")
         else:
             # --- CLEAN DATA ---
             data = data.dropna()
@@ -57,18 +57,18 @@ try:
             y_pred_rf = rf_model.predict(X_test)
 
             st.subheader("Model Accuracy (R² score)")
-            st.write(f"Linear Regression: {r2_score(y_test, y_pred_lr):.4f}")
-            st.write(f"Decision Tree:     {r2_score(y_test, y_pred_dt):.4f}")
-            st.write(f"Random Forest:     {r2_score(y_test, y_pred_rf):.4f}")
+            st.write(f"Linear Regression:  {r2_score(y_test, y_pred_lr):.4f}")
+            st.write(f"Decision Tree:      {r2_score(y_test, y_pred_dt):.4f}")
+            st.write(f"Random Forest:      {r2_score(y_test, y_pred_rf):.4f}")
 
             # --- PREDICT USER DATE ---
             try:
                 future_date = datetime.strptime(predict_date_str, "%Y-%m-%d")
                 future_ordinal = np.array([[future_date.toordinal()]])
                 
-                pred_lr = lr_model.predict(future_ordinal)[0]
-                pred_dt = dt_model.predict(future_ordinal)[0]
-                pred_rf = rf_model.predict(future_ordinal)[0]
+                pred_lr = float(lr_model.predict(future_ordinal)[0])
+                pred_dt = float(dt_model.predict(future_ordinal)[0])
+                pred_rf = float(rf_model.predict(future_ordinal)[0])
 
                 st.subheader(f"Predicted {ticker} Close Price on {future_date.date()}")
                 st.write(f"Linear Regression:  ${pred_lr:.2f}")
