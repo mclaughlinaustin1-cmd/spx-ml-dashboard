@@ -30,15 +30,22 @@ try:
         if data.empty:
             st.error(f"No historical data found for ticker '{ticker}'. Try another ticker.")
         else:
-            # --- CLEAN DATA ---
-            # Pick Close or Adj Close
+            # --- FLATTEN COLUMNS ---
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = [' '.join(col).strip() for col in data.columns.values]
+
+            # --- FIND PRICE COLUMN ---
             if 'Close' in data.columns:
                 price_col = 'Close'
             elif 'Adj Close' in data.columns:
                 price_col = 'Adj Close'
             else:
-                st.error("No Close/Adj Close column available. Cannot run prediction.")
-                st.stop()
+                # Fallback: take first numeric column
+                numeric_cols = data.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) == 0:
+                    st.error("No numeric price column found. Cannot run prediction.")
+                    st.stop()
+                price_col = numeric_cols[0]
 
             data = data.dropna(subset=[price_col])
             if data.empty:
