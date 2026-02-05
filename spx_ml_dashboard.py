@@ -213,7 +213,6 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
         for dt, tick, act, price, qty in st.session_state.trade_log:
             if tick==ticker:
                 all_y.append(price)
-                # Include P/L
                 current_price = df_plot["Close"].iloc[-1] if df_plot.index[-1]>=dt else price
                 pl = (current_price-price)*qty if act=="BUY" else (price-current_price)*qty
                 all_y.append(price+pl)
@@ -284,12 +283,20 @@ if run:
                        key=f"{t}_zoom", overlay_trades=True)
         with tab3:
             st.header(f"🧪 Paper Trading Simulator for {t}")
-            container = st.container()
-            with container:
-                sim_action = st.radio("Action", ["BUY","SELL"], key=f"{t}_action")
-                sim_amount = st.number_input("Amount to trade ($)", 100, step=100, key=f"{t}_amt")
-                if st.button("Execute Trade", key=f"{t}_btn"):
-                    paper_trade(t, sim_action, sim_amount, df)
+            df_current = df.copy()
+            if df_current.empty:
+                st.warning("Not enough data to trade.")
+            else:
+                with st.form(f"{t}_trade_form"):
+                    sim_action = st.radio("Action", ["BUY","SELL"], key=f"{t}_action")
+                    sim_amount = st.number_input("Amount to trade ($)", 100, step=100, key=f"{t}_amt")
+                    submitted = st.form_submit_button("Execute Trade")
+                    if submitted:
+                        try:
+                            paper_trade(t, sim_action, sim_amount, df_current)
+                        except Exception as e:
+                            st.error(f"Trade failed: {e}")
+
                 st.subheader("💼 Portfolio Overview")
                 st.write("Cash:", round(st.session_state.sim_cash,2))
                 holdings_list = []
