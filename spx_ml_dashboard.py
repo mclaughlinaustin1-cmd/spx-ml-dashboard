@@ -8,12 +8,11 @@ from datetime import datetime, timedelta
 # ---------------------------
 # CONFIG
 # ---------------------------
-st.set_page_config(layout="wide", page_title="AI Trading Dashboard")
+st.set_page_config(layout="wide", page_title="AI Trading Dashboard Pro")
 
 # ---------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ---------------------------
-
 TIMEFRAMES = {
     "24 Hours": "1d",
     "1 Week": "5d",
@@ -35,6 +34,10 @@ def add_indicators(df):
     df["MA20"] = df["Close"].rolling(20).mean()
     df["MA50"] = df["Close"].rolling(50).mean()
 
+    # Bollinger Bands
+    df["BB_upper"] = df["MA20"] + 2 * df["Close"].rolling(20).std()
+    df["BB_lower"] = df["MA20"] - 2 * df["Close"].rolling(20).std()
+
     # RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -51,7 +54,8 @@ def add_indicators(df):
     return df
 
 def forecast(df, days_ahead):
-    # Simple linear trend forecast
+    if len(df) < 2:
+        return [], np.array([])
     trend = np.polyfit(range(len(df)), df["Close"], 1)
     future_x = np.arange(len(df), len(df)+days_ahead)
     preds = trend[0]*future_x + trend[1]
@@ -61,8 +65,7 @@ def forecast(df, days_ahead):
 # ---------------------------
 # SIDEBAR UI
 # ---------------------------
-
-st.sidebar.title("AI Trading Dashboard")
+st.sidebar.title("AI Trading Dashboard Pro")
 ticker = st.sidebar.text_input("Ticker", "AAPL").upper()
 historical_range_label = st.sidebar.selectbox("Historical Data Range", list(TIMEFRAMES.keys()))
 days_ahead = st.sidebar.number_input("Predict Days Ahead", min_value=1, max_value=90, value=5, step=1)
@@ -70,6 +73,7 @@ chart_type = st.sidebar.radio("Chart Type", ["Candles", "Line"])
 show_rsi = st.sidebar.checkbox("Show RSI", True)
 show_macd = st.sidebar.checkbox("Show MACD", True)
 show_forecast = st.sidebar.checkbox("Show Forecast", True)
+show_bollinger = st.sidebar.checkbox("Show Bollinger Bands", True)
 
 # ---------------------------
 # TABS
@@ -84,10 +88,22 @@ df = add_indicators(df)
 future_dates, forecast_values = forecast(df, days_ahead)
 
 # ---------------------------
-# AUTOSCALE Y-AXIS
+# AUTOSCALE Y-AXIS (SAFE)
 # ---------------------------
-ymin = min(df["Low"].min(), forecast_values.min()) - 1
-ymax = max(df["High"].max(), forecast_values.max()) + 1
+ymin = df["Low"].min()
+ymax = df["High"].max()
+
+if show_forecast and len(forecast_values) > 0:
+    ymin = min(ymin, np.min(forecast_values))
+    ymax = max(ymax, np.max(forecast_values))
+
+if show_bollinger:
+    ymin = min(ymin, df["BB_lower"].min())
+    ymax = max(ymax, df["BB_upper"].max())
+
+pad = (ymax - ymin) * 0.05
+ymin -= pad
+ymax += pad
 
 # ---------------------------
 # MARKET TAB
@@ -96,6 +112,7 @@ with tabs[0]:
     st.subheader(f"{ticker} Market Data")
 
     fig = go.Figure()
+
     if chart_type == "Candles":
         fig.add_candlestick(
             x=df.index,
@@ -111,7 +128,11 @@ with tabs[0]:
     fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], mode="lines", name="MA20"))
     fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], mode="lines", name="MA50"))
 
-    if show_forecast:
+    if show_bollinger:
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], mode="lines", name="BB Upper", line=dict(dash="dot", color="cyan")))
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], mode="lines", name="BB Lower", line=dict(dash="dot", color="cyan")))
+
+    if show_forecast and len(forecast_values) > 0:
         fig.add_trace(go.Scatter(
             x=future_dates,
             y=forecast_values,
@@ -126,6 +147,7 @@ with tabs[0]:
         xaxis_rangeslider_visible=False,
         template="plotly_dark"
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
     # Metrics
@@ -144,7 +166,7 @@ with tabs[0]:
         st.line_chart(df[["MACD","Signal"]])
 
 # ---------------------------
-# PAPER TRADING SIMULATOR TAB
+# PAPER TRADING SIMULATOR
 # ---------------------------
 if "balance" not in st.session_state:
     st.session_state.balance = 10000
