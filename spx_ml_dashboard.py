@@ -19,10 +19,7 @@ def load_data(ticker, days):
     end = datetime.today()
     start = end - timedelta(days=days)
     # Intraday for short ranges
-    if days <= 30:
-        interval = "1h"
-    else:
-        interval = "1d"
+    interval = "1h" if days <= 30 else "1d"
     df = yf.download(ticker, start=start, end=end, interval=interval)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -155,19 +152,18 @@ def lstm_forecast_cached(prices, steps=7):
     return scaler.inverse_transform(pred_scaled.reshape(-1,1)).flatten()
 
 # ===================== CHART =====================
-def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=True, show_signals=True, show_forecast=True):
+def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=True, show_signals=True, show_forecast=True, key=None):
     fig = go.Figure()
     df_plot = df.iloc[-50:] if zoom else df
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Price"))
-    
+
     if show_macd:
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MACD"], name="MACD"))
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Signal"], name="Signal"))
-    
+
     if show_rsi:
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["RSI"], name="RSI"))
-    
-    # Buy/Sell markers
+
     if show_signals:
         buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index
         sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index
@@ -175,15 +171,15 @@ def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=
                                  marker=dict(color="green", size=10), name="BUY Signal"))
         fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
                                  marker=dict(color="red", size=10), name="SELL Signal"))
-    
-    # Forecast
-    if show_forecast and lstm_pred is not None and len(lstm_pred)>0:
+
+    if show_forecast and lstm_pred is not None and len(lstm_pred) > 0:
         future_dates = [df_plot.index[-1]+pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
         fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, name="LSTM Forecast", mode="lines+markers"))
-    
+
     fig.update_layout(title=f"{ticker} Chart", hovermode="x unified",
                       xaxis=dict(rangeslider=dict(visible=True), type="date"))
-    st.plotly_chart(fig, use_container_width=True)
+
+    st.plotly_chart(fig, use_container_width=True, key=key)  # ✅ unique key
 
 # ===================== UI =====================
 with st.sidebar:
@@ -230,10 +226,12 @@ if run:
         tab1, tab2 = st.tabs([f"{t} Full Chart", f"{t} Forecast Zoom"])
         with tab1:
             plot_chart(df, t, lstm_pred, zoom=False, show_rsi=show_rsi, show_macd=show_macd,
-                       show_signals=show_signals, show_forecast=show_forecast)
+                       show_signals=show_signals, show_forecast=show_forecast,
+                       key=f"{t}_full")
         with tab2:
             plot_chart(df, t, lstm_pred, zoom=True, show_rsi=show_rsi, show_macd=show_macd,
-                       show_signals=show_signals, show_forecast=show_forecast)
+                       show_signals=show_signals, show_forecast=show_forecast,
+                       key=f"{t}_zoom")
 
         portfolio_prices[t] = df["Close"]
 
