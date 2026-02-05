@@ -7,9 +7,11 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import MinMaxScaler
 from scipy.optimize import minimize
 import plotly.graph_objects as go
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config(page_title="AI Trading Platform", layout="wide")
-st.title("📈 AI Trading Platform")
+st.set_page_config("AI Trading Platform", layout="wide")
+st.title("📈 AI Trading Platform with LSTM & Alerts")
 
 # ================= DATA =================
 @st.cache_data(ttl=1800)
@@ -17,18 +19,14 @@ def load_data(ticker, days):
     end = datetime.today()
     start = end - timedelta(days=days)
     df = yf.download(ticker, start=start, end=end)
-
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
     return df.dropna()
 
 # ================= INDICATORS =================
 def add_indicators(df):
     df = df.copy()
     close = df["Close"]
-
-    # RSI
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -36,19 +34,13 @@ def add_indicators(df):
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss
     df["RSI"] = 100 - (100 / (1 + rs))
-
-    # MACD
     ema12 = close.ewm(span=12).mean()
     ema26 = close.ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
     df["Signal"] = df["MACD"].ewm(span=9).mean()
-
-    # Volatility & returns
     df["Returns"] = close.pct_change()
     df["Volatility"] = df["Returns"].rolling(20).std()
-
-    df = df.dropna()
-    return df
+    return df.dropna()
 
 # ================= TREND MODEL =================
 def trend_probability(df):
@@ -57,22 +49,17 @@ def trend_probability(df):
     df["Target"] = (df["Future"] > df["Close"]).astype(int)
     df = df.dropna()
     if len(df) < 10:
-        return 0.5  # Not enough data
-
+        return 0.5
     features = ["RSI","MACD","Signal","Volatility"]
     X = df[features].dropna()
     y = df.loc[X.index, "Target"]
-
     scaler = MinMaxScaler()
     X_scaled = scaler.fit_transform(X)
-
     model = RandomForestClassifier(n_estimators=300, random_state=42)
     model.fit(X_scaled, y)
-
     latest = df[features].iloc[-1:].fillna(method="bfill")
     latest_scaled = scaler.transform(latest)
-    prob_up = model.predict_proba(latest_scaled)[0][1]
-    return prob_up
+    return model.predict_proba(latest_scaled)[0][1]
 
 # ================= SIGNALS =================
 def signal(rsi, macd, sig):
@@ -144,12 +131,39 @@ def news_sentiment(ticker):
     except:
         return "Neutral ⚖"
 
+# ================= LSTM FORECAST =================
+def lstm_forecast(df, steps=7):
+    prices = df["Close"].values
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(prices.reshape(-1,1))
+    X = []
+    y = []
+    window = 30
+    for i in range(window, len(scaled)-steps):
+        X.append(scaled[i-window:i,0])
+        y.append(scaled[i:i+steps,0])
+    if len(X) == 0:
+        return []
+    X, y = np.array(X), np.array(y)
+    X = X.reshape((X.shape[0], X.shape[1],1))
+    model = Sequential()
+    model.add(LSTM(50, activation='relu', input_shape=(X.shape[1],1)))
+    model.add(Dense(steps))
+    model.compile(optimizer='adam', loss='mse')
+    model.fit(X,y,epochs=20,batch_size=16,verbose=0)
+    last_window = scaled[-window:].reshape((1,window,1))
+    pred_scaled = model.predict(last_window, verbose=0)[0]
+    return scaler.inverse_transform(pred_scaled.reshape(-1,1)).flatten()
+
 # ================= CHART =================
-def plot_chart(df, ticker):
+def plot_chart(df, ticker, lstm_pred=None):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Price"))
     fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
     fig.add_trace(go.Scatter(x=df.index, y=df["Signal"], name="Signal"))
+    if lstm_pred is not None:
+        future_dates = [df.index[-1]+pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
+        fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, name="LSTM Forecast", mode="lines+markers"))
     fig.update_layout(title=f"{ticker} Chart", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -162,27 +176,28 @@ with st.sidebar:
 st.subheader("📊 Market Overview")
 portfolio_prices = pd.DataFrame()
 
+# ================= APP =================
 if run:
     tickers = [t.strip() for t in tickers_input.upper().split(",")]
-
     results = []
 
     for t in tickers:
         df = load_data(t, days)
         if len(df) < 50:
-            st.warning(f"{t}: Not enough data for indicators")
+            st.warning(f"{t}: Not enough data")
             continue
-
         df = add_indicators(df)
         prob_up = trend_probability(df)
         sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1])
         risk = risk_level(df["Volatility"].iloc[-1])
         bt_val = backtest(df)
         news = news_sentiment(t)
+        lstm_pred = lstm_forecast(df)
 
         results.append([t, round(prob_up*100,1), sig, risk, bt_val, news])
 
-        plot_chart(df, t)
+        # Chart with LSTM forecast
+        plot_chart(df, t, lstm_pred)
 
         portfolio_prices[t] = df["Close"]
 
@@ -191,11 +206,16 @@ if run:
         if st.button(f"Paper SELL {t}"):
             paper_trade(t, df["Close"].iloc[-1], "SELL")
 
+        # Alert logic
+        if sig=="BUY" and prob_up>0.6:
+            st.info(f"🚨 ALERT: {t} strong BUY signal with {round(prob_up*100,1)}% trend probability!")
+        if sig=="SELL" and prob_up<0.4:
+            st.warning(f"⚠ ALERT: {t} strong SELL signal with {round(prob_up*100,1)}% trend probability!")
+
     if results:
         st.subheader("💼 AI Portfolio Overview")
         table = pd.DataFrame(results, columns=["Ticker","Trend Up %","Signal","Risk","Backtest $10k","News"])
         st.dataframe(table, use_container_width=True)
-
         st.write("Cash:", round(st.session_state.balance,2))
         st.write("Holdings:", st.session_state.shares)
 
@@ -205,4 +225,4 @@ if run:
             opt = pd.DataFrame({"Ticker":portfolio_prices.columns,"Weight":np.round(weights,3)})
             st.dataframe(opt, use_container_width=True)
 
-        st.success("Platform is running!")
+        st.success("Platform is running with LSTM forecasts and alerts ✅")
