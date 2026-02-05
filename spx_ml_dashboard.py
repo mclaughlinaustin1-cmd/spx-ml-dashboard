@@ -2,277 +2,237 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
 import plotly.graph_objects as go
+from sklearn.linear_model import LinearRegression
+from datetime import datetime
 
-# ----------------- Page Setup -----------------
-st.set_page_config(page_title="Ultimate AI Trading Dashboard", layout="wide")
-st.title("🚀 Ultimate AI Trading + Candlestick + Paper Trading Simulator")
+st.set_page_config(layout="wide")
 
-# ----------------- Data Loader -----------------
-@st.cache_data(ttl=1800)
-def load_data(ticker, days):
-    end = datetime.today()
-    start = end - timedelta(days=days)
-    interval = "1h" if days <= 30 else "1d"
-    df = yf.download(ticker, start=start, end=end, interval=interval)
+# ---------------- SESSION STATE ---------------- #
+
+if "trades" not in st.session_state:
+    st.session_state.trades = []
+
+if "cash" not in st.session_state:
+    st.session_state.cash = 10000.0
+
+# ---------------- DATA LOADER ---------------- #
+
+@st.cache_data
+def load_data(ticker, period):
+    df = yf.download(ticker, period=period, progress=False)
+
+    # flatten weird yfinance multi-index
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.dropna()
+        df.columns = [c[0] for c in df.columns]
 
-# ----------------- Indicators -----------------
+    df = df.dropna()
+    return df
+
+# ---------------- INDICATORS ---------------- #
+
 def add_indicators(df):
     df = df.copy()
-    close = df["Close"]
-    if len(close) < 14:
-        df["RSI"] = np.nan
-        df["MACD"] = np.nan
-        df["Signal"] = np.nan
-        df["Volatility"] = np.nan
-        df["Unusual"] = False
-        return df
-    # RSI
+
+    close = df["Close"].astype(float)
+
     delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
+
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(14).mean()
+
+    rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
-    # MACD
-    ema12 = close.ewm(span=12).mean()
-    ema26 = close.ewm(span=26).mean()
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+
     df["MACD"] = ema12 - ema26
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
-    # Volatility
-    df["Volatility"] = close.pct_change().rolling(20).std()
-    # Whale proxy
-    df["Unusual"] = df["Volume"] > df["Volume"].rolling(20).mean()*2
-    return df.dropna()
+    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-# ----------------- Trend Probability -----------------
-def trend_probability(df):
-    if len(df) < 10: return 0.5
-    df["Future"] = df["Close"].shift(-3)
-    df["Target"] = (df["Future"] > df["Close"]).astype(int)
-    df = df.dropna()
-    features = ["RSI","MACD","Signal","Volatility"]
-    X = df[features].dropna()
-    y = df.loc[X.index,"Target"]
-    if len(X) < 1: return 0.5
-    scaler = MinMaxScaler()
-    X_scaled = scaler.fit_transform(X)
-    model = RandomForestClassifier(n_estimators=200, random_state=42)
-    model.fit(X_scaled, y)
-    latest = df[features].iloc[-1:].fillna(method="bfill")
-    latest_scaled = scaler.transform(latest)
-    return model.predict_proba(latest_scaled)[0][1]
+    return df
 
-# ----------------- Signals -----------------
-def signal(rsi, macd, sig):
-    if pd.isna(rsi) or pd.isna(macd) or pd.isna(sig): return "N/A"
-    if rsi < 30 and macd > sig: return "BUY"
-    if rsi > 70 and macd < sig: return "SELL"
-    return "HOLD"
+# ---------------- FORECAST ---------------- #
 
-def risk_level(vol):
-    if pd.isna(vol): return "N/A"
-    if vol < 0.01: return "LOW"
-    if vol < 0.025: return "MEDIUM"
-    return "HIGH"
+def forecast(df, days=30):
+    if len(df) < 20:
+        return None, None
 
-# ----------------- LSTM Forecast -----------------
-@st.cache_data(ttl=3600)
-def lstm_forecast(prices, steps=7):
-    if len(prices) < 50: return []
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(prices.reshape(-1,1))
-    X, y = [], []
-    window = 30
-    for i in range(window, len(scaled)-steps):
-        X.append(scaled[i-window:i,0])
-        y.append(scaled[i:i+steps,0])
-    if len(X)==0: return []
-    X, y = np.array(X), np.array(y)
-    X = X.reshape((X.shape[0],X.shape[1],1))
-    model = Sequential()
-    model.add(LSTM(30, activation='relu', input_shape=(X.shape[1],1)))
-    model.add(Dense(steps))
-    model.compile(optimizer='adam', loss='mse')
-    model.fit(X,y,epochs=5,batch_size=8,verbose=0)
-    last_window = scaled[-window:].reshape((1,window,1))
-    pred_scaled = model.predict(last_window, verbose=0)[0]
-    return scaler.inverse_transform(pred_scaled.reshape(-1,1)).flatten()
+    y = df["Close"].values
+    X = np.arange(len(y)).reshape(-1,1)
 
-# ----------------- Paper Trading -----------------
-if "sim_cash" not in st.session_state:
-    st.session_state.sim_cash = 10000
-if "sim_holdings" not in st.session_state:
-    st.session_state.sim_holdings = {}
+    model = LinearRegression().fit(X, y)
 
-def paper_trade(ticker, action, amount):
-    df = load_data(ticker, 30)
-    if df.empty:
-        st.warning("Not enough data to execute trade!")
-        return
-    price = df["Close"].iloc[-1]
-    if action=="BUY":
-        qty = amount / price
-        if st.session_state.sim_cash >= amount:
-            st.session_state.sim_cash -= amount
-            if ticker not in st.session_state.sim_holdings:
-                st.session_state.sim_holdings[ticker] = {'qty':0,'avg_price':0}
-            current = st.session_state.sim_holdings[ticker]
-            total_cost = current['qty']*current['avg_price'] + amount
-            total_qty = current['qty'] + qty
-            current['qty'] = total_qty
-            current['avg_price'] = total_cost / total_qty
-    elif action=="SELL":
-        if ticker in st.session_state.sim_holdings:
-            current = st.session_state.sim_holdings[ticker]
-            if current['qty']>0:
-                sell_qty = min(amount/price, current['qty'])
-                current['qty'] -= sell_qty
-                st.session_state.sim_cash += sell_qty*price
-    st.success(f"{action} executed: {amount} USD @ {price:.2f} per share")
+    future_X = np.arange(len(y), len(y)+days).reshape(-1,1)
+    preds = model.predict(future_X)
 
-# ----------------- Plot Chart -----------------
-def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
-               show_rsi=True, show_macd=True, show_signals=True,
-               show_forecast=True, key=None, zoom=False):
+    future_dates = pd.date_range(df.index[-1], periods=days+1)[1:]
 
-    df_plot = df.iloc[-50:] if zoom else df
+    return future_dates, preds
+
+# ---------------- CHART ---------------- #
+
+def plot_chart(df, ticker, chart_type, show_rsi, show_macd, show_forecast):
+
     fig = go.Figure()
 
-    # Price
-    if chart_type=="candlestick":
-        fig.add_trace(go.Candlestick(x=df_plot.index,
-                                     open=df_plot["Open"],
-                                     high=df_plot["High"],
-                                     low=df_plot["Low"],
-                                     close=df_plot["Close"],
-                                     name="Price"))
+    if chart_type == "Candles":
+        fig.add_candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"]
+        )
     else:
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], mode="lines", name="Price"))
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df["Close"],
+            name="Price",
+            line=dict(width=2)
+        ))
 
-    # Indicators
-    if show_macd and "MACD" in df_plot:
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MACD"], name="MACD"))
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Signal"], name="Signal"))
-    if show_rsi and "RSI" in df_plot:
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["RSI"], name="RSI"))
+    ymin = float(df["Low"].min())
+    ymax = float(df["High"].max())
 
-    # Signals
-    buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index
-    sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index
-    fig.add_trace(go.Scatter(x=buy_idx, y=df_plot.loc[buy_idx,"Close"], mode="markers",
-                             marker=dict(size=12,color="green"), name="BUY"))
-    fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
-                             marker=dict(size=12,color="red"), name="SELL"))
+    # Trades overlay
+    for t in st.session_state.trades:
+        if t["ticker"] == ticker:
+            color = "green" if t["type"]=="BUY" else "red"
 
-    # Whale Proxy
-    unusual_idx = df_plot[df_plot["Unusual"]].index
-    fig.add_trace(go.Scatter(x=unusual_idx, y=df_plot.loc[unusual_idx,"Close"], mode="markers",
-                             marker=dict(size=14,color="purple",symbol="diamond"), name="Whale Proxy"))
+            fig.add_trace(go.Scatter(
+                x=[t["date"]],
+                y=[t["price"]],
+                mode="markers",
+                marker=dict(size=12, color=color),
+                name=t["type"]
+            ))
 
-    # LSTM Forecast
-    if show_forecast and lstm_pred is not None and len(lstm_pred)>0:
-        future_dates = [df_plot.index[-1] + pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
-        fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, mode="lines+markers", name="LSTM Forecast"))
+            ymin = min(ymin, t["price"])
+            ymax = max(ymax, t["price"])
 
-    # Autoscale Y-axis: $1 buffer above/below all points
-    all_y = df_plot["Close"].tolist()
-    if lstm_pred is not None and len(lstm_pred)>0: all_y += lstm_pred.tolist()
-    if len(buy_idx)>0: all_y += df_plot.loc[buy_idx,"Close"].tolist()
-    if len(sell_idx)>0: all_y += df_plot.loc[sell_idx,"Close"].tolist()
-    if len(unusual_idx)>0: all_y += df_plot.loc[unusual_idx,"Close"].tolist()
-    y_min, y_max = min(all_y)-1, max(all_y)+1
+    # Forecast overlay
+    if show_forecast:
+        fd, fp = forecast(df)
+        if fd is not None:
+            fig.add_trace(go.Scatter(
+                x=fd,
+                y=fp,
+                name="Forecast",
+                line=dict(dash="dot", width=2)
+            ))
+            ymin = min(ymin, float(fp.min()))
+            ymax = max(ymax, float(fp.max()))
 
-    # X-axis autoscale
-    x_min = df_plot.index.min()
-    x_max = df_plot.index.max()
+    pad = (ymax - ymin) * 0.05
+    ymin -= pad
+    ymax += pad
 
     fig.update_layout(
-        title=f"{ticker} Price & Signals",
-        hovermode="x unified",
-        xaxis=dict(range=[x_min, x_max], rangeslider=dict(visible=True)),
-        yaxis=dict(range=[y_min, y_max], fixedrange=False)
+        template="plotly_dark",
+        height=550,
+        yaxis=dict(range=[ymin, ymax]),
+        xaxis_rangeslider_visible=False,
+        title=ticker
     )
-    st.plotly_chart(fig, use_container_width=True, key=key)
 
-# ----------------- Sidebar -----------------
-with st.sidebar:
-    tickers_input = st.text_input("Tickers (comma)", "AAPL,MSFT,GOOG")
-    range_options = {"24 hours":1,"1 week":7,"1 month":30,"6 months":182,"1 year":365,"3 years":1095,"5 years":1825}
-    selected_range = st.selectbox("Historical range:", options=list(range_options.keys()))
-    days = range_options[selected_range]
-    show_rsi = st.checkbox("Show RSI", value=True)
-    show_macd = st.checkbox("Show MACD", value=True)
-    show_signals = st.checkbox("Show Signals", value=True)
-    show_forecast = st.checkbox("Show Forecast", value=True)
-    chart_type = st.radio("Chart Type", ["line","candlestick"])
-    run = st.button("Run Platform")
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("ℹ️ Indicator Guide")
-    st.markdown("""
-    - **Price:** Close / candlestick  
-    - **RSI:** 0-100, <30 BUY, >70 SELL  
-    - **MACD:** Trend direction  
-    - **Signal:** EMA9 of MACD  
-    - **Trend Probability:** AI chance to rise  
-    - **Volatility:** Risk  
-    - **Buy/Sell Signals:** Generated by RSI+MACD  
-    - **Whale Proxy:** Large volume spike  
-    - **LSTM Forecast:** AI future price
-    """)
+    # RSI
+    if show_rsi and "RSI" in df:
+        st.subheader("RSI")
+        st.line_chart(df["RSI"].dropna())
 
-# ----------------- Main -----------------
-st.subheader("📊 Market Overview")
-if run:
-    tickers = [t.strip().upper() for t in tickers_input.split(",")]
-    for t in tickers:
-        df = load_data(t, days)
-        if df.empty:
-            st.warning(f"{t}: No data available")
-            continue
-        df = add_indicators(df)
-        prob_up = trend_probability(df) if not df.empty else 0.5
-        sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1]) if not df.empty else "N/A"
-        risk = risk_level(df["Volatility"].iloc[-1]) if not df.empty else "N/A"
-        lstm_pred = lstm_forecast(df["Close"].values) if len(df["Close"])>=50 else []
+    # MACD
+    if show_macd and {"MACD","Signal"}.issubset(df.columns):
+        st.subheader("MACD")
+        st.line_chart(df[["MACD","Signal"]].dropna())
 
-        tab1, tab2, tab3 = st.tabs([f"{t} Full Chart", f"{t} Zoom", f"{t} Paper Trading"])
-        with tab1:
-            plot_chart(df, t, lstm_pred, chart_type, zoom=False,
-                       show_rsi=show_rsi, show_macd=show_macd,
-                       show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_full")
-        with tab2:
-            plot_chart(df, t, lstm_pred, chart_type, zoom=True,
-                       show_rsi=show_rsi, show_macd=show_macd,
-                       show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_zoom")
-        with tab3:
-            st.header(f"🧪 Paper Trading Simulator for {t}")
-            container = st.container()
-            with container:
-                sim_action = st.radio("Action", ["BUY","SELL"], key=f"{t}_action")
-                sim_amount = st.number_input("Amount to trade ($)", 100, step=100, key=f"{t}_amt")
-                if st.button("Execute Trade", key=f"{t}_btn"):
-                    paper_trade(t, sim_action, sim_amount)
-                st.subheader("💼 Portfolio Overview")
-                st.write("Cash:", round(st.session_state.sim_cash,2))
-                holdings_list = []
-                for h_t,h in st.session_state.sim_holdings.items():
-                    df_h = load_data(h_t, 30)
-                    price = df_h["Close"].iloc[-1] if not df_h.empty else h['avg_price']
-                    pl_percent = (price - h['avg_price'])/h['avg_price']*100 if h['avg_price']>0 else 0
-                    holdings_list.append([h_t,h['qty'],h['avg_price'],price,round(pl_percent,2)])
-                st.dataframe(pd.DataFrame(holdings_list, columns=["Ticker","Qty","Avg Price","Current Price","P/L %"]))
+# ---------------- SIDEBAR ---------------- #
 
-        if sig=="BUY" and prob_up>0.6: st.info(f"🚨 {t} strong BUY ({round(prob_up*100,1)}%)")
-        if sig=="SELL" and prob_up<0.4: st.warning(f"⚠ {t} strong SELL ({round(prob_up*100,1)}%)")
+st.sidebar.title("📊 Controls")
+
+ticker = st.sidebar.text_input("Ticker", "AAPL").upper()
+
+period = st.sidebar.selectbox(
+    "Range",
+    ["1mo","3mo","6mo","1y","3y","5y"]
+)
+
+chart_type = st.sidebar.radio("Chart", ["Line","Candles"])
+
+show_rsi = st.sidebar.checkbox("RSI", True)
+show_macd = st.sidebar.checkbox("MACD", True)
+show_forecast = st.sidebar.checkbox("Forecast", True)
+
+qty = st.sidebar.number_input("Shares", 1, 1000, 1)
+
+# ---------------- MAIN ---------------- #
+
+df = load_data(ticker, period)
+
+if df.empty:
+    st.warning("No data found")
+    st.stop()
+
+df = add_indicators(df)
+
+current_price = float(df["Close"].iloc[-1])
+
+st.metric("Current Price", f"${current_price:,.2f}")
+
+# ---------------- TRADING ---------------- #
+
+b1, b2 = st.sidebar.columns(2)
+
+if b1.button("📈 BUY"):
+    cost = current_price * qty
+    if st.session_state.cash >= cost:
+        st.session_state.cash -= cost
+        st.session_state.trades.append({
+            "ticker": ticker,
+            "type": "BUY",
+            "price": current_price,
+            "qty": qty,
+            "date": df.index[-1]
+        })
+
+if b2.button("📉 SELL"):
+    st.session_state.cash += current_price * qty
+    st.session_state.trades.append({
+        "ticker": ticker,
+        "type": "SELL",
+        "price": current_price,
+        "qty": qty,
+        "date": df.index[-1]
+    })
+
+# ---------------- CHART ---------------- #
+
+plot_chart(
+    df,
+    ticker,
+    chart_type,
+    show_rsi,
+    show_macd,
+    show_forecast
+)
+
+# ---------------- PORTFOLIO ---------------- #
+
+st.subheader("💼 Portfolio")
+
+profit = 0.0
+
+for t in st.session_state.trades:
+    if t["ticker"] == ticker:
+        if t["type"] == "BUY":
+            profit += (current_price - t["price"]) * t["qty"]
+        else:
+            profit += (t["price"] - current_price) * t["qty"]
+
+st.metric("Cash", f"${st.session_state.cash:,.2f}")
+st.metric("P/L", f"${profit:,.2f}")
+
+if st.session_state.trades:
+    st.dataframe(pd.DataFrame(st.session_state.trades))
