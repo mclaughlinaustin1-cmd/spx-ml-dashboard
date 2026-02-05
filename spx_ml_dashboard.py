@@ -27,29 +27,32 @@ def load_data(ticker, period):
     interval = "1h" if period in ["1d", "5d"] else "1d"
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     df.dropna(inplace=True)
+    if df.empty:
+        st.warning(f"No data available for {ticker} with period {period}.")
     return df
 
 def add_indicators(df):
     df = df.copy()
-    df["MA20"] = df["Close"].rolling(20).mean()
-    df["MA50"] = df["Close"].rolling(50).mean()
+    df["MA20"] = df["Close"].rolling(20, min_periods=1).mean()
+    df["MA50"] = df["Close"].rolling(50, min_periods=1).mean()
 
     # Bollinger Bands
-    df["BB_upper"] = df["MA20"] + 2 * df["Close"].rolling(20).std()
-    df["BB_lower"] = df["MA20"] - 2 * df["Close"].rolling(20).std()
+    rolling_std = df["Close"].rolling(20, min_periods=1).std()
+    df["BB_upper"] = df["MA20"] + 2 * rolling_std
+    df["BB_lower"] = df["MA20"] - 2 * rolling_std
 
     # RSI
     delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rs = gain / loss
-    df["RSI"] = 100 - (100/(1+rs))
+    gain = delta.clip(lower=0).rolling(14, min_periods=1).mean()
+    loss = -delta.clip(upper=0).rolling(14, min_periods=1).mean()
+    rs = gain / (loss + 1e-9)  # prevent division by zero
+    df["RSI"] = 100 - (100 / (1 + rs))
 
     # MACD
-    ema12 = df["Close"].ewm(span=12).mean()
-    ema26 = df["Close"].ewm(span=26).mean()
+    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
+    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
     return df
 
@@ -57,9 +60,9 @@ def forecast(df, days_ahead):
     if len(df) < 2:
         return [], np.array([])
     trend = np.polyfit(range(len(df)), df["Close"], 1)
-    future_x = np.arange(len(df), len(df)+days_ahead)
-    preds = trend[0]*future_x + trend[1]
-    future_dates = [df.index[-1] + timedelta(days=i+1) for i in range(days_ahead)]
+    future_x = np.arange(len(df), len(df) + days_ahead)
+    preds = trend[0] * future_x + trend[1]
+    future_dates = [df.index[-1] + timedelta(days=i + 1) for i in range(days_ahead)]
     return future_dates, preds
 
 # ---------------------------
@@ -84,11 +87,14 @@ tabs = st.tabs(["📊 Market", "💰 Paper Trading Simulator"])
 # LOAD DATA
 # ---------------------------
 df = load_data(ticker, TIMEFRAMES[historical_range_label])
+if df.empty:
+    st.stop()  # stop if no data
+
 df = add_indicators(df)
 future_dates, forecast_values = forecast(df, days_ahead)
 
 # ---------------------------
-# AUTOSCALE Y-AXIS (SAFE)
+# AUTOSCALE Y-AXIS
 # ---------------------------
 ymin = df["Low"].min()
 ymax = df["High"].max()
@@ -129,8 +135,10 @@ with tabs[0]:
     fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], mode="lines", name="MA50"))
 
     if show_bollinger:
-        fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], mode="lines", name="BB Upper", line=dict(dash="dot", color="cyan")))
-        fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], mode="lines", name="BB Lower", line=dict(dash="dot", color="cyan")))
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], mode="lines", name="BB Upper",
+                                 line=dict(dash="dot", color="cyan")))
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], mode="lines", name="BB Lower",
+                                 line=dict(dash="dot", color="cyan")))
 
     if show_forecast and len(forecast_values) > 0:
         fig.add_trace(go.Scatter(
@@ -163,7 +171,7 @@ with tabs[0]:
 
     if show_macd:
         st.subheader("MACD")
-        st.line_chart(df[["MACD","Signal"]])
+        st.line_chart(df[["MACD", "Signal"]])
 
 # ---------------------------
 # PAPER TRADING SIMULATOR
@@ -204,5 +212,6 @@ with tabs[1]:
         st.subheader("Trade Log")
         st.table(pd.DataFrame(
             st.session_state.trades,
-            columns=["Type","Price","Shares","Time"]
+            columns=["Type", "Price", "Shares", "Time"]
         ))
+
