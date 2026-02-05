@@ -40,9 +40,9 @@ def add_indicators(df):
     df["MA50"] = df["Close"].rolling(window=50, min_periods=1).mean()
 
     # Bollinger Bands (robust)
-    rolling_std = df["Close"].rolling(20, min_periods=1).std()
-    df["BB_upper"] = df["MA20"].values + 2 * rolling_std.values
-    df["BB_lower"] = df["MA20"].values - 2 * rolling_std.values
+    rolling_std = df["Close"].rolling(20, min_periods=1).std().to_numpy().ravel()
+    df["BB_upper"] = df["MA20"].to_numpy().ravel() + 2 * rolling_std
+    df["BB_lower"] = df["MA20"].to_numpy().ravel() - 2 * rolling_std
 
     # RSI
     delta = df["Close"].diff().fillna(0)
@@ -84,7 +84,6 @@ def plot_chart(df, forecast_dates=None, forecast_values=None, trades=None, chart
         ymin = min(ymin, df["BB_lower"].min())
         ymax = max(ymax, df["BB_upper"].max())
 
-    # Add padding
     pad = (ymax - ymin) * 0.05
     ymin -= pad
     ymax += pad
@@ -218,5 +217,4 @@ with tabs[1]:
     if st.session_state.trades:
         st.subheader("Trade Log")
         st.table(pd.DataFrame(st.session_state.trades, columns=["Type","Price","Shares","Time"]))
-
 
