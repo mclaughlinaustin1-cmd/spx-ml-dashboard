@@ -21,14 +21,14 @@ TIMEFRAMES = {
 }
 
 # ---------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ---------------------------
 def load_data(ticker, period):
-    interval = "1h" if period in ["1d", "5d"] else "1d"
+    interval = "1h" if period in ["1d","5d"] else "1d"
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     df.dropna(inplace=True)
     if df.empty:
-        st.warning(f"No data available for {ticker} with period {period}.")
+        st.warning(f"No data for {ticker} with period {period}.")
     return df
 
 def add_indicators(df):
@@ -39,14 +39,13 @@ def add_indicators(df):
     df["MA20"] = df["Close"].rolling(window=20, min_periods=1).mean()
     df["MA50"] = df["Close"].rolling(window=50, min_periods=1).mean()
 
-    # Bollinger Bands (safe)
-    rolling_std = df["Close"].rolling(window=20, min_periods=1).std()
-    rolling_std = rolling_std.reindex(df.index).fillna(0)
-    df["BB_upper"] = df["MA20"] + 2 * rolling_std
-    df["BB_lower"] = df["MA20"] - 2 * rolling_std
+    # Bollinger Bands (robust)
+    rolling_std = df["Close"].rolling(20, min_periods=1).std()
+    df["BB_upper"] = df["MA20"].values + 2 * rolling_std.values
+    df["BB_lower"] = df["MA20"].values - 2 * rolling_std.values
 
     # RSI
-    delta = df["Close"].diff()
+    delta = df["Close"].diff().fillna(0)
     gain = delta.clip(lower=0).rolling(14, min_periods=1).mean()
     loss = -delta.clip(upper=0).rolling(14, min_periods=1).mean()
     rs = gain / (loss + 1e-9)
@@ -66,8 +65,8 @@ def forecast(df, days_ahead):
     if len(df) < 2:
         return [], np.array([])
     trend = np.polyfit(range(len(df)), df["Close"], 1)
-    future_x = np.arange(len(df), len(df) + days_ahead)
-    preds = trend[0] * future_x + trend[1]
+    future_x = np.arange(len(df), len(df)+days_ahead)
+    preds = trend[0]*future_x + trend[1]
     future_dates = [df.index[-1] + timedelta(days=i+1) for i in range(days_ahead)]
     return future_dates, preds
 
@@ -75,14 +74,17 @@ def plot_chart(df, forecast_dates=None, forecast_values=None, trades=None, chart
     ymin = df["Low"].min()
     ymax = df["High"].max()
 
+    # Include forecast in autoscale
     if forecast_values is not None and len(forecast_values) > 0:
         ymin = min(ymin, np.min(forecast_values))
         ymax = max(ymax, np.max(forecast_values))
 
+    # Include Bollinger Bands
     if "BB_lower" in df.columns and "BB_upper" in df.columns:
         ymin = min(ymin, df["BB_lower"].min())
         ymax = max(ymax, df["BB_upper"].max())
 
+    # Add padding
     pad = (ymax - ymin) * 0.05
     ymin -= pad
     ymax += pad
@@ -90,7 +92,7 @@ def plot_chart(df, forecast_dates=None, forecast_values=None, trades=None, chart
     fig = go.Figure()
 
     # Price
-    if chart_type == "Candles":
+    if chart_type=="Candles":
         fig.add_trace(go.Candlestick(
             x=df.index,
             open=df["Open"],
@@ -138,7 +140,7 @@ st.sidebar.title("AI Trading Dashboard Pro")
 ticker = st.sidebar.text_input("Ticker", "AAPL").upper()
 historical_range_label = st.sidebar.selectbox("Historical Data Range", list(TIMEFRAMES.keys()))
 days_ahead = st.sidebar.number_input("Forecast Days Ahead", 1, 90, value=5)
-chart_type = st.sidebar.radio("Chart Type", ["Candles", "Line"])
+chart_type = st.sidebar.radio("Chart Type", ["Candles","Line"])
 show_rsi = st.sidebar.checkbox("Show RSI", True)
 show_macd = st.sidebar.checkbox("Show MACD", True)
 show_bollinger = st.sidebar.checkbox("Show Bollinger Bands", True)
@@ -216,6 +218,5 @@ with tabs[1]:
     if st.session_state.trades:
         st.subheader("Trade Log")
         st.table(pd.DataFrame(st.session_state.trades, columns=["Type","Price","Shares","Time"]))
-
 
 
