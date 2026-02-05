@@ -10,10 +10,10 @@ import plotly.graph_objects as go
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config("AI Trading Platform", layout="wide")
-st.title("📈 Fast AI Trading Platform with Alerts & LSTM")
+st.set_page_config("AI Trading Dashboard", layout="wide")
+st.title("📈 AI Trading Platform (Zoomed Forecast + Multi-Stock)")
 
-# ================= DATA =================
+# ===================== DATA =====================
 @st.cache_data(ttl=1800)
 def load_data(ticker, days):
     end = datetime.today()
@@ -23,7 +23,7 @@ def load_data(ticker, days):
         df.columns = df.columns.get_level_values(0)
     return df.dropna()
 
-# ================= INDICATORS =================
+# ===================== INDICATORS =====================
 def add_indicators(df):
     df = df.copy()
     close = df["Close"]
@@ -42,16 +42,16 @@ def add_indicators(df):
     df["Volatility"] = df["Returns"].rolling(20).std()
     return df.dropna()
 
-# ================= TREND MODEL =================
+# ===================== TREND MODEL =====================
 def trend_probability(df):
     df = df.copy()
     df["Future"] = df["Close"].shift(-3)
     df["Target"] = (df["Future"] > df["Close"]).astype(int)
     df = df.dropna()
-    if len(df) < 10: return 0.5
+    if len(df)<10: return 0.5
     features = ["RSI","MACD","Signal","Volatility"]
     X = df[features].dropna()
-    y = df.loc[X.index, "Target"]
+    y = df.loc[X.index,"Target"]
     scaler = MinMaxScaler()
     X_scaled = scaler.fit_transform(X)
     model = RandomForestClassifier(n_estimators=200, random_state=42)
@@ -60,18 +60,18 @@ def trend_probability(df):
     latest_scaled = scaler.transform(latest)
     return model.predict_proba(latest_scaled)[0][1]
 
-# ================= SIGNALS & RISK =================
+# ===================== SIGNALS & RISK =====================
 def signal(rsi, macd, sig):
     if rsi < 30 and macd > sig: return "BUY"
     if rsi > 70 and macd < sig: return "SELL"
     return "HOLD"
 
 def risk_level(vol):
-    if vol < 0.01: return "LOW"
-    if vol < 0.025: return "MEDIUM"
+    if vol<0.01: return "LOW"
+    if vol<0.025: return "MEDIUM"
     return "HIGH"
 
-# ================= BACKTEST =================
+# ===================== BACKTEST =====================
 def backtest(df):
     cash = 10000
     shares = 0
@@ -86,7 +86,7 @@ def backtest(df):
             shares = 0
     return round(cash + shares*df["Close"].iloc[-1],2)
 
-# ================= PAPER TRADING =================
+# ===================== PAPER TRADING =====================
 if "balance" not in st.session_state:
     st.session_state.balance = 10000
     st.session_state.shares = {}
@@ -102,7 +102,7 @@ def paper_trade(ticker, price, action):
         st.session_state.balance += st.session_state.shares[ticker]*price
         st.session_state.shares[ticker] = 0
 
-# ================= PORTFOLIO OPTIMIZER =================
+# ===================== PORTFOLIO OPTIMIZER =====================
 def optimize_portfolio(prices):
     returns = prices.pct_change().dropna()
     cov = returns.cov()
@@ -114,7 +114,7 @@ def optimize_portfolio(prices):
     res = minimize(risk, w0, bounds=bounds, constraints=cons)
     return res.x
 
-# ================= NEWS SENTIMENT =================
+# ===================== NEWS SENTIMENT =====================
 def news_sentiment(ticker):
     try:
         news = yf.Ticker(ticker).news[:5]
@@ -126,7 +126,7 @@ def news_sentiment(ticker):
     except:
         return "Neutral ⚖"
 
-# ================= LSTM FORECAST (CACHED) =================
+# ===================== LSTM FORECAST (CACHED) =====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def lstm_forecast_cached(prices, steps=7):
     if len(prices)<50: return []
@@ -149,28 +149,43 @@ def lstm_forecast_cached(prices, steps=7):
     pred_scaled = model.predict(last_window, verbose=0)[0]
     return scaler.inverse_transform(pred_scaled.reshape(-1,1)).flatten()
 
-# ================= CHART =================
-def plot_chart(df, ticker, lstm_pred=None):
+# ===================== CHART =====================
+def plot_chart(df, ticker, lstm_pred=None, zoom=False):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Price"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["Signal"], name="Signal"))
+    if zoom:
+        df_plot = df.iloc[-50:]
+    else:
+        df_plot = df
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Price"))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MACD"], name="MACD"))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Signal"], name="Signal"))
     if lstm_pred is not None and len(lstm_pred)>0:
-        future_dates = [df.index[-1]+pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
+        future_dates = [df_plot.index[-1]+pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
         fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, name="LSTM Forecast", mode="lines+markers"))
-    fig.update_layout(title=f"{ticker} Chart", hovermode="x unified")
+    fig.update_layout(title=f"{ticker} Chart", hovermode="x unified",
+                      xaxis=dict(rangeslider=dict(visible=True), type="date"))
     st.plotly_chart(fig, use_container_width=True)
 
-# ================= UI =================
+# ===================== UI =====================
 with st.sidebar:
     tickers_input = st.text_input("Tickers (comma)", "AAPL,MSFT,GOOG")
-    days = st.selectbox("History (days)", [180,365,730,1825], index=1)
+    range_options = {
+        "24 hours":1,
+        "1 week":7,
+        "1 month":30,
+        "6 months":182,
+        "1 year":365,
+        "3 years":1095,
+        "5 years":1825
+    }
+    selected_range = st.selectbox("Select historical range:", options=list(range_options.keys()))
+    days = range_options[selected_range]
     run = st.button("Run Platform")
 
 st.subheader("📊 Market Overview")
 portfolio_prices = pd.DataFrame()
 
-# ================= APP =================
+# ===================== APP =====================
 if run:
     tickers = [t.strip().upper() for t in tickers_input.split(",")]
     results = []
@@ -190,14 +205,23 @@ if run:
 
         results.append([t, round(prob_up*100,1), sig, risk, bt_val, news])
 
-        plot_chart(df, t, lstm_pred)
+        # ===================== TABS =====================
+        tab1, tab2 = st.tabs([f"{t} Full Chart", f"{t} Forecast Zoom"])
+        with tab1:
+            plot_chart(df, t)
+        with tab2:
+            plot_chart(df, t, lstm_pred, zoom=True)
 
         portfolio_prices[t] = df["Close"]
 
-        if st.button(f"Paper BUY {t}"):
-            paper_trade(t, df["Close"].iloc[-1], "BUY")
-        if st.button(f"Paper SELL {t}"):
-            paper_trade(t, df["Close"].iloc[-1], "SELL")
+        # PAPER TRADING BUTTONS
+        col1, col2 = st.columns(2)
+        with col1: 
+            if st.button(f"Paper BUY {t}"):
+                paper_trade(t, df["Close"].iloc[-1], "BUY")
+        with col2:
+            if st.button(f"Paper SELL {t}"):
+                paper_trade(t, df["Close"].iloc[-1], "SELL")
 
         # ALERTS
         if sig=="BUY" and prob_up>0.6:
@@ -205,6 +229,7 @@ if run:
         if sig=="SELL" and prob_up<0.4:
             st.warning(f"⚠ ALERT: {t} strong SELL signal ({round(prob_up*100,1)}%)")
 
+    # ===================== PORTFOLIO TABLE =====================
     if results:
         st.subheader("💼 AI Portfolio Overview")
         table = pd.DataFrame(results, columns=["Ticker","Trend Up %","Signal","Risk","Backtest $10k","News"])
@@ -218,4 +243,4 @@ if run:
             opt = pd.DataFrame({"Ticker":portfolio_prices.columns,"Weight":np.round(weights,3)})
             st.dataframe(opt, use_container_width=True)
 
-        st.success("Platform running FAST with cached LSTM forecasts ✅")
+        st.success("Platform running FAST with zoomed LSTM forecasts ✅")
