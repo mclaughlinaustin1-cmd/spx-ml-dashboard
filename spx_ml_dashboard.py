@@ -36,11 +36,12 @@ def add_indicators(df):
     df.index = pd.to_datetime(df.index)
 
     # Moving averages
-    df["MA20"] = df["Close"].rolling(20, min_periods=1).mean()
-    df["MA50"] = df["Close"].rolling(50, min_periods=1).mean()
+    df["MA20"] = df["Close"].rolling(window=20, min_periods=1).mean()
+    df["MA50"] = df["Close"].rolling(window=50, min_periods=1).mean()
 
-    # Bollinger Bands
-    rolling_std = df["Close"].rolling(20, min_periods=1).std().reindex(df.index).fillna(0)
+    # Bollinger Bands (safe)
+    rolling_std = df["Close"].rolling(window=20, min_periods=1).std()
+    rolling_std = rolling_std.reindex(df.index).fillna(0)
     df["BB_upper"] = df["MA20"] + 2 * rolling_std
     df["BB_lower"] = df["MA20"] - 2 * rolling_std
 
@@ -88,6 +89,7 @@ def plot_chart(df, forecast_dates=None, forecast_values=None, trades=None, chart
 
     fig = go.Figure()
 
+    # Price
     if chart_type == "Candles":
         fig.add_trace(go.Candlestick(
             x=df.index,
@@ -108,10 +110,11 @@ def plot_chart(df, forecast_dates=None, forecast_values=None, trades=None, chart
         fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], mode="lines", line=dict(dash="dot", color="cyan"), name="BB Upper"))
         fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], mode="lines", line=dict(dash="dot", color="cyan"), name="BB Lower"))
 
+    # Forecast
     if forecast_values is not None and forecast_dates is not None and len(forecast_values) > 0:
         fig.add_trace(go.Scatter(x=forecast_dates, y=forecast_values, mode="lines", line=dict(dash="dash", color="yellow"), name="Forecast"))
 
-    # Paper trades
+    # Trades overlay
     if trades:
         for t_type, t_price, t_qty, t_time in trades:
             color = "green" if t_type=="BUY" else "red"
@@ -213,5 +216,6 @@ with tabs[1]:
     if st.session_state.trades:
         st.subheader("Trade Log")
         st.table(pd.DataFrame(st.session_state.trades, columns=["Type","Price","Shares","Time"]))
+
 
 
