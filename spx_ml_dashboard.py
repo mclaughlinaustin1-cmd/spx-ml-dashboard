@@ -13,6 +13,14 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Ultimate AI Trading Dashboard", layout="wide")
 st.title("🚀 Ultimate AI Trading + Candlestick + Real-Time P/L Overlay")
 
+# ----------------- Session State Initialization -----------------
+if "sim_cash" not in st.session_state:
+    st.session_state.sim_cash = 10000
+if "sim_holdings" not in st.session_state:
+    st.session_state.sim_holdings = {}
+if "trade_log" not in st.session_state:
+    st.session_state.trade_log = []
+
 # ----------------- Data Loader -----------------
 @st.cache_data(ttl=1800)
 def load_data(ticker, days):
@@ -20,6 +28,8 @@ def load_data(ticker, days):
     start = end - timedelta(days=days)
     interval = "1h" if days <= 30 else "1d"
     df = yf.download(ticker, start=start, end=end, interval=interval)
+    if df.empty:
+        return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df.dropna()
@@ -35,7 +45,6 @@ def add_indicators(df):
         df["Volatility"] = np.nan
         df["Unusual"] = False
         return df
-    # RSI
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -43,15 +52,12 @@ def add_indicators(df):
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss
     df["RSI"] = 100 - (100 / (1 + rs))
-    # MACD
     ema12 = close.ewm(span=12).mean()
     ema26 = close.ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
     df["Signal"] = df["MACD"].ewm(span=9).mean()
-    # Volatility
     df["Volatility"] = close.pct_change().rolling(20).std()
-    # Whale proxy
-    df["Unusual"] = df["Volume"] > df["Volume"].rolling(20).mean()*2
+    df["Unusual"] = df["Volume"] > df["Volume"].rolling(20).mean() * 2
     return df.dropna()
 
 # ----------------- Trend Probability -----------------
@@ -108,14 +114,7 @@ def lstm_forecast(prices, steps=7):
     pred_scaled = model.predict(last_window, verbose=0)[0]
     return scaler.inverse_transform(pred_scaled.reshape(-1,1)).flatten()
 
-# ----------------- Paper Trading -----------------
-if "sim_cash" not in st.session_state:
-    st.session_state.sim_cash = 10000
-if "sim_holdings" not in st.session_state:
-    st.session_state.sim_holdings = {}
-if "trade_log" not in st.session_state:
-    st.session_state.trade_log = []
-
+# ----------------- Paper Trading Functions -----------------
 def paper_trade(ticker, action, amount, df):
     if df.empty:
         st.warning("Not enough data to execute trade!")
@@ -143,15 +142,15 @@ def paper_trade(ticker, action, amount, df):
                 st.session_state.trade_log.append((df.index[-1],ticker,"SELL",price,sell_qty))
     st.success(f"{action} executed: {amount} USD @ {price:.2f} per share")
 
-# ----------------- Plot Chart -----------------
+# ----------------- Chart Plotting -----------------
 def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
                show_rsi=True, show_macd=True, show_signals=True,
-               show_forecast=True, key=None, zoom=False, overlay_trades=True):
+               show_forecast=True, overlay_trades=True, zoom=False, key=None):
 
     df_plot = df.iloc[-50:] if zoom else df
     fig = go.Figure()
 
-    # Price
+    # Price / Candlestick
     if chart_type=="candlestick":
         fig.add_trace(go.Candlestick(x=df_plot.index,
                                      open=df_plot["Open"],
@@ -203,7 +202,7 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
                     textposition="top center",
                     name=f"Paper {act}"))
 
-    # Autoscale Y-axis: $1 buffer above/below all points
+    # Autoscale Y-axis with buffer
     all_y = df_plot["Close"].tolist()
     if lstm_pred is not None and len(lstm_pred)>0: all_y += lstm_pred.tolist()
     if len(buy_idx)>0: all_y += df_plot.loc[buy_idx,"Close"].tolist()
@@ -217,14 +216,13 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
                 pl = (current_price-price)*qty if act=="BUY" else (price-current_price)*qty
                 all_y.append(price+pl)
     y_min, y_max = min(all_y)-1, max(all_y)+1
-    x_min = df_plot.index.min()
-    x_max = df_plot.index.max()
+    x_min, x_max = df_plot.index.min(), df_plot.index.max()
 
     fig.update_layout(
         title=f"{ticker} Price & Signals",
         hovermode="x unified",
-        xaxis=dict(range=[x_min, x_max], rangeslider=dict(visible=True)),
-        yaxis=dict(range=[y_min, y_max], fixedrange=False)
+        xaxis=dict(range=[x_min,x_max], rangeslider=dict(visible=True)),
+        yaxis=dict(range=[y_min,y_max], fixedrange=False)
     )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
@@ -241,22 +239,28 @@ with st.sidebar:
     chart_type = st.radio("Chart Type", ["line","candlestick"])
     run = st.button("Run Platform")
 
-    st.subheader("ℹ️ Indicator Guide")
-    st.markdown("""
-    - **Price:** Close / candlestick  
-    - **RSI:** 0-100, <30 BUY, >70 SELL  
-    - **MACD:** Trend direction  
-    - **Signal:** EMA9 of MACD  
-    - **Trend Probability:** AI chance to rise  
-    - **Volatility:** Risk  
-    - **Buy/Sell Signals:** Generated by RSI+MACD  
-    - **Whale Proxy:** Large volume spike  
-    - **LSTM Forecast:** AI future price  
-    - **Paper Trades:** Blue=BUY, Orange=SELL with P/L overlay
-    """)
+    st.subheader("🧪 Paper Trading Simulator")
+    trade_ticker = st.text_input("Trade Ticker", "AAPL")
+    action = st.radio("Action", ["BUY","SELL"])
+    amount = st.number_input("Amount to trade ($)", 100, step=100)
+    if st.button("Execute Paper Trade"):
+        try:
+            df_trade = load_data(trade_ticker, 30)
+            paper_trade(trade_ticker, action, amount, df_trade)
+        except Exception as e:
+            st.error(f"Trade failed: {e}")
+
+    st.subheader("💼 Portfolio Overview")
+    st.write("Cash:", round(st.session_state.sim_cash,2))
+    holdings_list = []
+    for h_t,h in st.session_state.sim_holdings.items():
+        df_h = load_data(h_t, 30)
+        price = df_h["Close"].iloc[-1] if not df_h.empty else h['avg_price']
+        pl_percent = (price - h['avg_price'])/h['avg_price']*100 if h['avg_price']>0 else 0
+        holdings_list.append([h_t,h['qty'],h['avg_price'],price,round(pl_percent,2)])
+    st.dataframe(pd.DataFrame(holdings_list, columns=["Ticker","Qty","Avg Price","Current Price","P/L %"]))
 
 # ----------------- Main -----------------
-st.subheader("📊 Market Overview")
 if run:
     tickers = [t.strip().upper() for t in tickers_input.split(",")]
     for t in tickers:
@@ -265,47 +269,22 @@ if run:
             st.warning(f"{t}: No data available")
             continue
         df = add_indicators(df)
-        prob_up = trend_probability(df) if not df.empty else 0.5
-        sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1]) if not df.empty else "N/A"
-        risk = risk_level(df["Volatility"].iloc[-1]) if not df.empty else "N/A"
+        prob_up = trend_probability(df)
+        sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1])
+        risk = risk_level(df["Volatility"].iloc[-1])
         lstm_pred = lstm_forecast(df["Close"].values) if len(df["Close"])>=50 else []
 
-        tab1, tab2, tab3 = st.tabs([f"{t} Full Chart", f"{t} Zoom", f"{t} Paper Trading"])
+        tab1, tab2 = st.tabs([f"{t} Full Chart", f"{t} Zoom"])
         with tab1:
             plot_chart(df, t, lstm_pred, chart_type, zoom=False,
                        show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_full", overlay_trades=True)
+                       key=f"{t}_full")
         with tab2:
             plot_chart(df, t, lstm_pred, chart_type, zoom=True,
                        show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_zoom", overlay_trades=True)
-        with tab3:
-            st.header(f"🧪 Paper Trading Simulator for {t}")
-            df_current = df.copy()
-            if df_current.empty:
-                st.warning("Not enough data to trade.")
-            else:
-                with st.form(f"{t}_trade_form"):
-                    sim_action = st.radio("Action", ["BUY","SELL"], key=f"{t}_action")
-                    sim_amount = st.number_input("Amount to trade ($)", 100, step=100, key=f"{t}_amt")
-                    submitted = st.form_submit_button("Execute Trade")
-                    if submitted:
-                        try:
-                            paper_trade(t, sim_action, sim_amount, df_current)
-                        except Exception as e:
-                            st.error(f"Trade failed: {e}")
-
-                st.subheader("💼 Portfolio Overview")
-                st.write("Cash:", round(st.session_state.sim_cash,2))
-                holdings_list = []
-                for h_t,h in st.session_state.sim_holdings.items():
-                    df_h = load_data(h_t, 30)
-                    price = df_h["Close"].iloc[-1] if not df_h.empty else h['avg_price']
-                    pl_percent = (price - h['avg_price'])/h['avg_price']*100 if h['avg_price']>0 else 0
-                    holdings_list.append([h_t,h['qty'],h['avg_price'],price,round(pl_percent,2)])
-                st.dataframe(pd.DataFrame(holdings_list, columns=["Ticker","Qty","Avg Price","Current Price","P/L %"]))
-
+                       key=f"{t}_zoom")
+        
         if sig=="BUY" and prob_up>0.6: st.info(f"🚨 {t} strong BUY ({round(prob_up*100,1)}%)")
         if sig=="SELL" and prob_up<0.4: st.warning(f"⚠ {t} strong SELL ({round(prob_up*100,1)}%)")
