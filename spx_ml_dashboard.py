@@ -50,7 +50,7 @@ def add_indicators(df):
     df["Signal"] = df["MACD"].ewm(span=9).mean()
     # Volatility
     df["Volatility"] = close.pct_change().rolling(20).std()
-    # Free whale proxy
+    # Whale proxy
     df["Unusual"] = df["Volume"] > df["Volume"].rolling(20).mean()*2
     return df.dropna()
 
@@ -108,7 +108,7 @@ def lstm_forecast(prices, steps=7):
     pred_scaled = model.predict(last_window, verbose=0)[0]
     return scaler.inverse_transform(pred_scaled.reshape(-1,1)).flatten()
 
-# ----------------- Paper Trading State -----------------
+# ----------------- Paper Trading -----------------
 if "sim_cash" not in st.session_state:
     st.session_state.sim_cash = 10000
     st.session_state.sim_holdings = {}
@@ -136,24 +136,13 @@ def paper_trade(ticker, action, amount):
                 current['qty'] -= sell_qty
                 st.session_state.sim_cash += sell_qty*price
 
-# ----------------- Plotting -----------------
-def plot_chart(df, ticker, lstm_pred=None, chart_type="line", zoom=False,
+# ----------------- Plot Chart -----------------
+def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
                show_rsi=True, show_macd=True, show_signals=True,
-               show_forecast=True, key=None, x_range=None, y_range=None):
+               show_forecast=True, key=None, zoom=False):
 
     df_plot = df.iloc[-50:] if zoom else df
     fig = go.Figure()
-
-    # Combine Y range with forecast
-    y_vals = df_plot["Close"].values.tolist()
-    if show_forecast and lstm_pred is not None: y_vals += lstm_pred.tolist()
-    y_min, y_max = min(y_vals), max(y_vals)
-    y_padding = (y_max - y_min) * 0.05
-    y_axis_range = [y_min - y_padding, y_max + y_padding]
-
-    if y_range is not None:
-        y_axis_range = [max(y_min - y_padding, y_range[0]),
-                        min(y_max + y_padding, y_range[1])]
 
     # Price
     if chart_type=="candlestick":
@@ -172,31 +161,42 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line", zoom=False,
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Signal"], name="Signal"))
     if show_rsi and "RSI" in df_plot:
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["RSI"], name="RSI"))
-    if show_signals:
-        buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index
-        sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index
-        fig.add_trace(go.Scatter(x=buy_idx, y=df_plot.loc[buy_idx,"Close"], mode="markers",
-                                 marker=dict(size=12,color="green"), name="BUY"))
-        fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
-                                 marker=dict(size=12,color="red"), name="SELL"))
 
+    # Signals
+    buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index
+    sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index
+    fig.add_trace(go.Scatter(x=buy_idx, y=df_plot.loc[buy_idx,"Close"], mode="markers",
+                             marker=dict(size=12,color="green"), name="BUY"))
+    fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
+                             marker=dict(size=12,color="red"), name="SELL"))
+
+    # Whale Proxy
     unusual_idx = df_plot[df_plot["Unusual"]].index
     fig.add_trace(go.Scatter(x=unusual_idx, y=df_plot.loc[unusual_idx,"Close"], mode="markers",
                              marker=dict(size=14,color="purple",symbol="diamond"), name="Whale Proxy"))
 
+    # LSTM Forecast
     if show_forecast and lstm_pred is not None:
-        future_dates = [df_plot.index[-1]+pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
+        future_dates = [df_plot.index[-1] + pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
         fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, mode="lines+markers", name="LSTM Forecast"))
 
+    # Autoscale Y-axis above all markers + $1 buffer
+    all_y = df_plot["Close"].tolist()
+    if lstm_pred is not None: all_y += lstm_pred.tolist()
+    if len(buy_idx)>0: all_y += df_plot.loc[buy_idx,"Close"].tolist()
+    if len(sell_idx)>0: all_y += df_plot.loc[sell_idx,"Close"].tolist()
+    if len(unusual_idx)>0: all_y += df_plot.loc[unusual_idx,"Close"].tolist()
+    y_min, y_max = min(all_y)-1, max(all_y)+1
+
     fig.update_layout(
-        title=f"{ticker} Price & Indicators",
+        title=f"{ticker} Price & Signals",
         hovermode="x unified",
-        xaxis=dict(rangeslider=dict(visible=True), range=x_range),
-        yaxis=dict(fixedrange=False, range=y_axis_range)
+        xaxis=dict(rangeslider=dict(visible=True)),
+        yaxis=dict(range=[y_min, y_max], fixedrange=False)
     )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
-# ----------------- Sidebar -----------------
+# ----------------- Sidebar Controls -----------------
 with st.sidebar:
     tickers_input = st.text_input("Tickers (comma)", "AAPL,MSFT,GOOG")
     range_options = {"24 hours":1,"1 week":7,"1 month":30,"6 months":182,"1 year":365,"3 years":1095,"5 years":1825}
@@ -208,6 +208,7 @@ with st.sidebar:
     show_forecast = st.checkbox("Show Forecast", value=True)
     chart_type = st.radio("Chart Type", ["line","candlestick"])
     run = st.button("Run Platform")
+
     st.subheader("ℹ️ Indicator Guide")
     st.markdown("""
     - **Price:** Close / candlestick  
@@ -225,45 +226,42 @@ with st.sidebar:
 st.subheader("📊 Market Overview")
 if run:
     tickers = [t.strip().upper() for t in tickers_input.split(",")]
-    results = []
     for t in tickers:
         df = load_data(t, days)
         if df.empty:
             st.warning(f"{t}: No data available")
             continue
         df = add_indicators(df)
-        if df.empty or df["RSI"].isna().all():
-            sig="N/A"; prob_up=0.5; risk="N/A"; lstm_pred=[]
-        else:
-            prob_up = trend_probability(df)
-            sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1])
-            risk = risk_level(df["Volatility"].iloc[-1])
-            lstm_pred = lstm_forecast(df["Close"].values)
+        prob_up = trend_probability(df) if not df.empty else 0.5
+        sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1]) if not df.empty else "N/A"
+        risk = risk_level(df["Volatility"].iloc[-1]) if not df.empty else "N/A"
+        lstm_pred = lstm_forecast(df["Close"].values) if len(df["Close"])>=50 else []
 
-        x_range = st.sidebar.date_input(f"{t} X-axis range", [df.index.min().date(), df.index.max().date()])
-        y_range = st.sidebar.slider(f"{t} Y-axis range", float(df["Close"].min()), float(df["Close"].max()),
-                                    (float(df["Close"].min()), float(df["Close"].max())))
-
-        tab1, tab2 = st.tabs([f"{t} Full Chart", f"{t} Zoom"])
+        tab1, tab2, tab3 = st.tabs([f"{t} Full Chart", f"{t} Zoom", f"{t} Paper Trading"])
         with tab1:
             plot_chart(df, t, lstm_pred, chart_type, zoom=False,
                        show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_full", x_range=x_range, y_range=y_range)
+                       key=f"{t}_full")
         with tab2:
             plot_chart(df, t, lstm_pred, chart_type, zoom=True,
                        show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_zoom", x_range=x_range, y_range=y_range)
+                       key=f"{t}_zoom")
+        with tab3:
+            st.header(f"🧪 Paper Trading Simulator for {t}")
+            sim_action = st.radio("Action", ["BUY","SELL"], key=f"{t}_action")
+            sim_amount = st.number_input("Amount to trade ($)", 100, step=100, key=f"{t}_amt")
+            if st.button("Execute Trade", key=f"{t}_btn"):
+                paper_trade(t, sim_action, sim_amount)
+            st.subheader("💼 Portfolio Overview")
+            st.write("Cash:", round(st.session_state.sim_cash,2))
+            holdings_list = []
+            for h_t,h in st.session_state.sim_holdings.items():
+                price = load_data(h_t, 30)["Close"].iloc[-1] if not load_data(h_t,30).empty else h['avg_price']
+                pl_percent = (price - h['avg_price'])/h['avg_price']*100 if h['avg_price']>0 else 0
+                holdings_list.append([h_t,h['qty'],h['avg_price'],price,round(pl_percent,2)])
+            st.dataframe(pd.DataFrame(holdings_list, columns=["Ticker","Qty","Avg Price","Current Price","P/L %"]))
 
         if sig=="BUY" and prob_up>0.6: st.info(f"🚨 {t} strong BUY ({round(prob_up*100,1)}%)")
         if sig=="SELL" and prob_up<0.4: st.warning(f"⚠ {t} strong SELL ({round(prob_up*100,1)}%)")
-        results.append([t, round(prob_up*100,1), sig, risk, df["Unusual"].sum()])
-
-    # Portfolio table
-    if results:
-        st.subheader("💼 Portfolio Overview")
-        table = pd.DataFrame(results, columns=["Ticker","Trend Up %","Signal","Risk","Whale Proxy Spikes"])
-        st.dataframe(table, use_container_width=True)
-        st.write("💰 Cash:", round(st.session_state.sim_cash,2))
-        st.write("📈 Holdings:", st.session_state.sim_holdings)
