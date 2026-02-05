@@ -3,141 +3,188 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import MinMaxScaler
 import plotly.graph_objects as go
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="AI Stock Predictor", layout="wide")
-st.title("📈 AI Stock Price Predictor")
+st.set_page_config(page_title="AI Trading Dashboard", layout="wide")
+st.title("📊 AI Trading Intelligence Platform")
 
-# ---------------- DATA ----------------
+# ================= DATA =================
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def fetch_data(ticker, days):
     end = datetime.today()
     start = end - timedelta(days=days)
     df = yf.download(ticker, start=start, end=end)
 
-    # Flatten multi-index columns if present
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    return df[["Close"]].dropna()
+    return df.dropna()
 
-# ---------------- FEATURES ----------------
+# ================= INDICATORS =================
 
-def make_features(df):
-    price = df["Close"].values.ravel()  # force 1D
+def add_indicators(df):
+    close = df["Close"]
 
-    ma20 = pd.Series(price).rolling(20).mean().values
-    ma50 = pd.Series(price).rolling(50).mean().values
-    returns = pd.Series(price).pct_change().values
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    X = np.column_stack([
-        np.arange(len(price)),
-        ma20,
-        ma50,
-        returns
-    ])
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
 
-    mask = ~np.isnan(X).any(axis=1)
+    rs = avg_gain / avg_loss
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-    X = X[mask]
-    y = price[mask]
-    dates = df.index[mask]
+    ema12 = close.ewm(span=12).mean()
+    ema26 = close.ewm(span=26).mean()
+    df["MACD"] = ema12 - ema26
+    df["Signal"] = df["MACD"].ewm(span=9).mean()
 
-    return X, y, dates
+    df["Returns"] = close.pct_change()
+    df["Volatility"] = df["Returns"].rolling(20).std()
 
-# ---------------- MODEL ----------------
+    df = df.dropna()
+    return df
 
-def train_models(X, y):
-    lr = LinearRegression()
-    rf = RandomForestRegressor(n_estimators=250, random_state=42)
+# ================= ML TREND MODEL =================
 
-    lr.fit(X, y)
-    rf.fit(X, y)
+def train_trend_model(df):
+    df["Future"] = df["Close"].shift(-3)
+    df["Target"] = (df["Future"] > df["Close"]).astype(int)
+    df = df.dropna()
 
-    return lr, rf
+    features = ["RSI", "MACD", "Signal", "Volatility"]
+    X = df[features]
+    y = df["Target"]
 
-# ---------------- PLOT ----------------
+    scaler = MinMaxScaler()
+    X = scaler.fit_transform(X)
 
-def plot_chart(dates, prices, preds, future_date):
+    model = RandomForestClassifier(n_estimators=300, random_state=42)
+    model.fit(X, y)
+
+    latest = scaler.transform(df[features].iloc[-1:].values)
+    prob_up = model.predict_proba(latest)[0][1]
+
+    return prob_up
+
+# ================= SIGNAL LOGIC =================
+
+def trading_signal(rsi, macd, signal):
+    if rsi < 30 and macd > signal:
+        return "🟢 BUY"
+    elif rsi > 70 and macd < signal:
+        return "🔴 SELL"
+    else:
+        return "🟡 HOLD"
+
+def risk_level(vol):
+    if vol < 0.01:
+        return "LOW"
+    elif vol < 0.025:
+        return "MEDIUM"
+    else:
+        return "HIGH"
+
+# ================= NEWS SENTIMENT =================
+
+def news_sentiment(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        news = stock.news[:5]
+
+        positive = 0
+        negative = 0
+
+        for n in news:
+            title = n["title"].lower()
+            if any(w in title for w in ["up", "beats", "growth", "surge", "profit"]):
+                positive += 1
+            if any(w in title for w in ["down", "miss", "drop", "loss", "fall"]):
+                negative += 1
+
+        if positive > negative:
+            return "📈 Positive"
+        elif negative > positive:
+            return "📉 Negative"
+        else:
+            return "⚖ Neutral"
+
+    except:
+        return "⚖ Neutral"
+
+# ================= PLOT =================
+
+def plot_chart(df, ticker):
     fig = go.Figure()
 
-    fig.add_trace(go.Scatter(x=dates, y=prices, name="Price"))
-
-    fig.add_trace(go.Scatter(
-        x=[future_date],
-        y=[preds["lr"]],
-        mode="markers+text",
-        name="LR Prediction",
-        text=[f"${preds['lr']:.2f}"]
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=[future_date],
-        y=[preds["rf"]],
-        mode="markers+text",
-        name="RF Prediction",
-        text=[f"${preds['rf']:.2f}"]
-    ))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Price"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Signal"], name="Signal"))
 
     fig.update_layout(
-        title="Stock Price & AI Forecast",
+        title=f"{ticker} Price & Indicators",
         hovermode="x unified"
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-# ---------------- UI ----------------
+# ================= UI =================
 
 with st.sidebar:
-    ticker = st.text_input("Stock ticker", "AAPL").upper()
+    tickers = st.text_input("Stock tickers (comma separated)", "AAPL,MSFT").upper()
     days = st.selectbox("History range", [180, 365, 730, 1825], index=1)
-    future_date = st.date_input("Prediction date", datetime.today()+timedelta(days=7))
-    run = st.button("Run Forecast")
+    run = st.button("Run Analysis")
 
-# ---------------- APP ----------------
+# ================= APP =================
 
 if run:
-    raw = fetch_data(ticker, days)
+    stocks = [t.strip() for t in tickers.split(",")]
 
-    if raw.empty or len(raw) < 80:
-        st.error("Not enough stock data.")
-        st.stop()
+    results = []
 
-    X, y, dates = make_features(raw)
+    for ticker in stocks:
+        df = fetch_data(ticker, days)
 
-    split = int(len(X) * 0.8)
+        if df.empty or len(df) < 80:
+            st.warning(f"{ticker}: not enough data")
+            continue
 
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
+        df = add_indicators(df)
 
-    lr, rf = train_models(X_train, y_train)
+        prob_up = train_trend_model(df)
 
-    last_prices = raw["Close"].values.ravel()
+        rsi = df["RSI"].iloc[-1]
+        macd = df["MACD"].iloc[-1]
+        signal_line = df["Signal"].iloc[-1]
+        vol = df["Volatility"].iloc[-1]
 
-    future_features = np.array([
-        len(last_prices),
-        np.mean(last_prices[-20:]),
-        np.mean(last_prices[-50:]),
-        (last_prices[-1] - last_prices[-2]) / last_prices[-2]
-    ]).reshape(1, -1)
+        signal = trading_signal(rsi, macd, signal_line)
+        risk = risk_level(vol)
+        sentiment = news_sentiment(ticker)
 
-    pred_lr = lr.predict(future_features).item()
-    pred_rf = rf.predict(future_features).item()
+        results.append([
+            ticker,
+            round(prob_up * 100, 1),
+            signal,
+            risk,
+            sentiment
+        ])
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Linear Regression", f"${pred_lr:.2f}")
-    col2.metric("Random Forest", f"${pred_rf:.2f}")
-    col3.metric("Average", f"${(pred_lr + pred_rf)/2:.2f}")
+        st.subheader(f"{ticker} Chart")
+        plot_chart(df, ticker)
 
-    st.subheader("Model Accuracy")
-    st.write("LR R²:", round(r2_score(y_test, lr.predict(X_test)), 4))
-    st.write("RF R²:", round(r2_score(y_test, rf.predict(X_test)), 4))
+    if results:
+        st.subheader("📊 AI Market Overview")
 
-    plot_chart(dates, last_prices[-len(dates):], {"lr": pred_lr, "rf": pred_rf}, future_date)
+        table = pd.DataFrame(
+            results,
+            columns=["Ticker", "Trend Up %", "Signal", "Risk", "News Sentiment"]
+        )
 
-    st.success("Forecast complete!")
+        st.dataframe(table, use_container_width=True)
+
+        st.success("Analysis complete!")
