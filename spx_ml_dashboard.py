@@ -155,7 +155,6 @@ def lstm_forecast_cached(prices, steps=7):
 
 # ===================== UNUSUAL WHALES PLACEHOLDER =====================
 def get_unusual_whales(ticker):
-    # Replace with your API key and endpoint
     return [{"type":"Block Trade","size":"$2M","info":"Large option sweep"}]
 
 # ===================== PLOTLY CHART =====================
@@ -176,11 +175,14 @@ def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=
                                  marker=dict(size=10,color="green"), name="BUY"))
         fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
                                  marker=dict(size=10,color="red"), name="SELL"))
-    if show_forecast and lstm_pred:
-        future_dates = [df_plot.index[-1]+pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
-        fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, mode="lines+markers", name="LSTM Forecast"))
+    # Safe LSTM plot
+    try:
+        if show_forecast and lstm_pred is not None and len(lstm_pred) > 0:
+            future_dates = [df_plot.index[-1] + pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
+            fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, mode="lines+markers", name="LSTM Forecast"))
+    except Exception as e:
+        st.warning(f"LSTM forecast unavailable: {e}")
 
-    # Range selectors
     fig.update_layout(
         title=f"{ticker} Price & Indicators",
         hovermode="x unified",
