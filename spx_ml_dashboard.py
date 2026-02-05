@@ -3,129 +3,85 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
-from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Stock Price Predictor", layout="wide")
-st.title("📈 Stock Price Predictor & Interactive Chart")
+st.set_page_config("Stock AI Predictor", layout="wide")
 
-try:
-    # --- USER INPUT ---
-    ticker = st.text_input("Enter a stock ticker (e.g., AAPL, MSFT)", value="AAPL").upper()
+@st.cache_data(ttl=3600)
+def fetch_data(ticker, days):
+    end = datetime.today()
+    start = end - timedelta(days=days)
+    return yf.download(ticker, start=start, end=end)
 
-    range_options = {
-        "24 hours": 1,
-        "6 months": 182,
-        "1 year": 365,
-        "2 years": 730,
-        "5 years": 1825
-    }
-    selected_range = st.selectbox("Select historical data range:", options=list(range_options.keys()))
-    predict_date_str = st.text_input(
-        "Enter a date to predict (YYYY-MM-DD)",
-        value=(datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
-    )
+def add_features(df, price):
+    df["MA20"] = df[price].rolling(20).mean()
+    df["MA50"] = df[price].rolling(50).mean()
+    df["Returns"] = df[price].pct_change()
+    df["Ordinal"] = df.index.map(datetime.toordinal)
+    df = df.dropna()
+    return df
 
-    if st.button("Run Prediction"):
-        # --- DOWNLOAD DATA ---
-        end_date = datetime.today()
-        start_date = end_date - timedelta(days=range_options[selected_range])
-        data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
+def train_models(X, y):
+    lr = LinearRegression().fit(X, y)
+    rf = RandomForestRegressor(n_estimators=200).fit(X, y)
+    return lr, rf
 
-        if data.empty:
-            st.error(f"No historical data found for ticker '{ticker}'.")
-        else:
-            # --- FLATTEN MULTIINDEX COLUMNS ---
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = [' '.join(col).strip() for col in data.columns.values]
+def plot_chart(df, price, preds):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df.index, y=df[price], name="Price"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], name="MA50"))
 
-            # --- SELECT PRICE COLUMN ---
-            if 'Close' in data.columns:
-                price_col = 'Close'
-            elif 'Adj Close' in data.columns:
-                price_col = 'Adj Close'
-            else:
-                numeric_cols = data.select_dtypes(include=[np.number]).columns
-                if len(numeric_cols) == 0:
-                    st.error("No numeric price column found.")
-                    st.stop()
-                price_col = numeric_cols[0]
+    for label, val, date in preds:
+        fig.add_trace(go.Scatter(
+            x=[date], y=[val], mode="markers+text",
+            name=label, text=[f"${val:.2f}"]
+        ))
+    st.plotly_chart(fig, use_container_width=True)
 
-            data = data.dropna(subset=[price_col])
-            data['Date'] = data.index
-            data['Date_ordinal'] = pd.to_datetime(data['Date']).map(datetime.toordinal)
+# ---------- UI ----------
 
-            X = data[['Date_ordinal']]
-            y = data[price_col]
+st.title("📊 AI Stock Predictor")
 
-            # --- SPLIT AND TRAIN MODELS ---
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+with st.sidebar:
+    ticker = st.text_input("Stock Ticker", "AAPL")
+    days = st.selectbox("History Range", [180, 365, 730, 1825])
+    future_date = st.date_input("Predict Date", datetime.today()+timedelta(days=7))
+    run = st.button("Run AI Forecast")
 
-            lr_model = LinearRegression().fit(X_train, y_train)
-            dt_model = DecisionTreeRegressor(max_depth=5, random_state=42).fit(X_train, y_train)
-            rf_model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42).fit(X_train, y_train)
+if run:
+    data = fetch_data(ticker, days)
 
-            # --- TEST ACCURACY ---
-            st.subheader("Model Accuracy (R² score)")
-            st.write(f"Linear Regression:  {r2_score(y_test, lr_model.predict(X_test)):.4f}")
-            st.write(f"Decision Tree:      {r2_score(y_test, dt_model.predict(X_test)):.4f}")
-            st.write(f"Random Forest:      {r2_score(y_test, rf_model.predict(X_test)):.4f}")
+    price = "Close"
+    data = add_features(data, price)
 
-            # --- PREDICT FUTURE DATE ---
-            try:
-                future_date = datetime.strptime(predict_date_str, "%Y-%m-%d")
-                future_ordinal = np.array([[future_date.toordinal()]])
+    X = data[["Ordinal", "MA20", "MA50", "Returns"]]
+    y = data[price]
 
-                pred_lr = lr_model.predict(future_ordinal).item()
-                pred_dt = dt_model.predict(future_ordinal).item()
-                pred_rf = rf_model.predict(future_ordinal).item()
+    split = int(len(X)*0.8)
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
 
-                st.subheader(f"Predicted {ticker} Close Price on {future_date.date()}")
-                st.write(f"Linear Regression:  ${pred_lr:.2f}")
-                st.write(f"Decision Tree:      ${pred_dt:.2f}")
-                st.write(f"Random Forest:      ${pred_rf:.2f}")
+    lr, rf = train_models(X_train, y_train)
 
-            except Exception as e:
-                st.error(f"Error predicting price: {e}")
+    future_features = X.iloc[-1].copy()
+    future_features["Ordinal"] = future_date.toordinal()
+    future_features = np.array(future_features).reshape(1, -1)
 
-            # --- INTERACTIVE PLOTLY CHART ---
-            fig = go.Figure()
-            # Historical prices
-            fig.add_trace(go.Scatter(
-                x=data['Date'], y=data[price_col],
-                mode='lines+markers', name='Historical Price'
-            ))
-            # Predicted price
-            if 'future_date' in locals():
-                fig.add_trace(go.Scatter(
-                    x=[future_date], y=[pred_lr],
-                    mode='markers+text', name='Predicted (LR)',
-                    marker=dict(color='green', size=12),
-                    text=[f"${pred_lr:.2f}"]
-                ))
-                fig.add_trace(go.Scatter(
-                    x=[future_date], y=[pred_dt],
-                    mode='markers+text', name='Predicted (DT)',
-                    marker=dict(color='orange', size=12),
-                    text=[f"${pred_dt:.2f}"]
-                ))
-                fig.add_trace(go.Scatter(
-                    x=[future_date], y=[pred_rf],
-                    mode='markers+text', name='Predicted (RF)',
-                    marker=dict(color='red', size=12),
-                    text=[f"${pred_rf:.2f}"]
-                ))
+    pred_lr = lr.predict(future_features)[0]
+    pred_rf = rf.predict(future_features)[0]
 
-            fig.update_layout(
-                title=f"{ticker} Historical & Predicted Price",
-                xaxis_title="Date", yaxis_title="Price",
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    st.metric("Linear Forecast", f"${pred_lr:.2f}")
+    st.metric("Random Forest Forecast", f"${pred_rf:.2f}")
 
-except Exception as e:
-    st.error(f"App encountered an error: {e}")
+    st.write("Model Accuracy")
+    st.write("LR:", r2_score(y_test, lr.predict(X_test)))
+    st.write("RF:", r2_score(y_test, rf.predict(X_test)))
+
+    plot_chart(data, price, [
+        ("LR Prediction", pred_lr, future_date),
+        ("RF Prediction", pred_rf, future_date)
+    ])
