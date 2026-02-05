@@ -9,11 +9,12 @@ from scipy.optimize import minimize
 import plotly.graph_objects as go
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
+import requests
 
 st.set_page_config("AI Trading Dashboard", layout="wide")
 st.title("📈 AI Trading Platform - TradingView Style")
 
-# ===================== DATA =====================
+# ===================== DATA LOADER =====================
 @st.cache_data(ttl=1800)
 def load_data(ticker, days):
     end = datetime.today()
@@ -129,19 +130,7 @@ def optimize_portfolio(prices):
     res = minimize(risk, w0, bounds=bounds, constraints=cons)
     return res.x
 
-# ===================== NEWS SENTIMENT =====================
-def news_sentiment(ticker):
-    try:
-        news = yf.Ticker(ticker).news[:5]
-        pos = sum(1 for n in news if any(w in n["title"].lower() for w in ["up","beats","growth","profit","surge"]))
-        neg = sum(1 for n in news if any(w in n["title"].lower() for w in ["down","drop","loss","fall","miss"]))
-        if pos>neg: return "Positive 📈"
-        if neg>pos: return "Negative 📉"
-        return "Neutral ⚖"
-    except:
-        return "Neutral ⚖"
-
-# ===================== LSTM FORECAST (CACHED) =====================
+# ===================== LSTM FORECAST =====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def lstm_forecast_cached(prices, steps=7):
     if len(prices) < 50: return []
@@ -164,33 +153,55 @@ def lstm_forecast_cached(prices, steps=7):
     pred_scaled = model.predict(last_window, verbose=0)[0]
     return scaler.inverse_transform(pred_scaled.reshape(-1,1)).flatten()
 
-# ===================== CHART =====================
-def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=True, show_signals=True, show_forecast=True, key=None):
+# ===================== UNUSUAL WHALES PLACEHOLDER =====================
+def get_unusual_whales(ticker):
+    # Replace with your API key and endpoint
+    return [{"type":"Block Trade","size":"$2M","info":"Large option sweep"}]
+
+# ===================== PLOTLY CHART =====================
+def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=True,
+               show_signals=True, show_forecast=True, key=None, x_range=None, y_range=None):
     fig = go.Figure()
     df_plot = df.iloc[-50:] if zoom else df
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Price"))
-
-    if show_macd and "MACD" in df_plot and "Signal" in df_plot:
+    if show_macd and "MACD" in df_plot:
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MACD"], name="MACD"))
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Signal"], name="Signal"))
-
     if show_rsi and "RSI" in df_plot:
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["RSI"], name="RSI"))
-
     if show_signals:
-        buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index if "RSI" in df_plot else []
-        sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index if "RSI" in df_plot else []
+        buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index
+        sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index
         fig.add_trace(go.Scatter(x=buy_idx, y=df_plot.loc[buy_idx,"Close"], mode="markers",
-                                 marker=dict(color="green", size=10), name="BUY Signal"))
+                                 marker=dict(size=10,color="green"), name="BUY"))
         fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
-                                 marker=dict(color="red", size=10), name="SELL Signal"))
-
-    if show_forecast and lstm_pred is not None and len(lstm_pred) > 0:
+                                 marker=dict(size=10,color="red"), name="SELL"))
+    if show_forecast and lstm_pred:
         future_dates = [df_plot.index[-1]+pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
-        fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, name="LSTM Forecast", mode="lines+markers"))
+        fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, mode="lines+markers", name="LSTM Forecast"))
 
-    fig.update_layout(title=f"{ticker} Chart", hovermode="x unified",
-                      xaxis=dict(rangeslider=dict(visible=True), type="date"))
+    # Range selectors
+    fig.update_layout(
+        title=f"{ticker} Price & Indicators",
+        hovermode="x unified",
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1d", step="day", stepmode="backward"),
+                    dict(count=7, label="1w", step="day", stepmode="backward"),
+                    dict(count=1, label="1m", step="month", stepmode="backward"),
+                    dict(count=3, label="3m", step="month", stepmode="backward"),
+                    dict(count=6, label="6m", step="month", stepmode="backward"),
+                    dict(count=1, label="1y", step="year", stepmode="backward"),
+                    dict(step="all")
+                ])
+            ),
+            rangeslider=dict(visible=True),
+            type="date",
+            range=x_range
+        ),
+        yaxis=dict(fixedrange=False, range=y_range)
+    )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 # ===================== UI =====================
@@ -213,7 +224,7 @@ with st.sidebar:
     show_forecast = st.checkbox("Show Forecast", value=True)
     run = st.button("Run Platform")
 
-# ===================== INDICATOR EXPLANATION PANEL =====================
+# ===================== INDICATOR EXPLANATION =====================
 st.sidebar.subheader("ℹ️ Indicator Explanation")
 st.sidebar.markdown("""
 - **Price:** Current stock price (Close)
@@ -224,6 +235,7 @@ st.sidebar.markdown("""
 - **Volatility:** Price fluctuations (LOW / MEDIUM / HIGH risk)
 - **Buy/Sell Signals:** Generated by RSI + MACD
 - **LSTM Forecast:** AI future price projection (next 7 periods)
+- **Whale Activity:** Major trades detected (Unusual Whales API)
 """)
 
 # ===================== APP =====================
@@ -239,8 +251,8 @@ if run:
         if df.empty:
             st.warning(f"{t}: No data available for selected range")
             continue
-
         df = add_indicators(df)
+
         # Safe signal & probability
         if df.empty or "RSI" not in df or df["RSI"].isna().all():
             sig = "N/A"
@@ -255,18 +267,25 @@ if run:
             bt_val = backtest(df)
             lstm_pred = lstm_forecast_cached(df["Close"].values)
 
-        news = news_sentiment(t)
-        results.append([t, round(prob_up*100,1), sig, risk, bt_val, news])
+        whales = get_unusual_whales(t)
+        news = "Placeholder News"
+
+        results.append([t, round(prob_up*100,1), sig, risk, bt_val, whales, news])
+
+        # Interactive chart with adjustable ranges
+        x_range = st.sidebar.date_input(f"{t} X-axis range", [df.index.min().date(), df.index.max().date()])
+        y_range = st.sidebar.slider(f"{t} Y-axis range", float(df["Close"].min()), float(df["Close"].max()),
+                                    (float(df["Close"].min()), float(df["Close"].max())))
 
         tab1, tab2 = st.tabs([f"{t} Full Chart", f"{t} Forecast Zoom"])
         with tab1:
             plot_chart(df, t, lstm_pred, zoom=False, show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_full")
+                       key=f"{t}_full", x_range=x_range, y_range=y_range)
         with tab2:
             plot_chart(df, t, lstm_pred, zoom=True, show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_zoom")
+                       key=f"{t}_zoom", x_range=x_range, y_range=y_range)
 
         portfolio_prices[t] = df["Close"]
 
@@ -285,7 +304,7 @@ if run:
 
     if results:
         st.subheader("💼 AI Portfolio Overview")
-        table = pd.DataFrame(results, columns=["Ticker","Trend Up %","Signal","Risk","Backtest $10k","News"])
+        table = pd.DataFrame(results, columns=["Ticker","Trend Up %","Signal","Risk","Backtest $10k","Whales Activity","News"])
         st.dataframe(table, use_container_width=True)
         st.write("Cash:", round(st.session_state.balance,2))
         st.write("Holdings:", st.session_state.shares)
