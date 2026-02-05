@@ -3,141 +3,161 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Institutional Terminal", page_icon="📈")
+st.set_page_config(layout="wide", page_title="AI Institutional Terminal", page_icon="🏛️")
 
-# --- Custom Styling ---
+# --- Custom UI Styling ---
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    div.stButton > button { width: 100%; border-radius: 5px; height: 3em; background-color: #262730; color: white; border: 1px solid #444; }
-    div.stButton > button:hover { border: 1px solid #00ffcc; color: #00ffcc; }
-    .metric-container { background-color: #161b22; border: 1px solid #30363d; padding: 15px; border-radius: 10px; }
+    .stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 10px; border-radius: 8px; }
+    [data-testid="stExpander"] { border: 1px solid #30363d; background: #161b22; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- Helpers ---
-TIMEFRAMES = {"1 Month": "1mo", "6 Months": "6mo", "1 Year": "1y", "Max": "max"}
+# --- Logic Modules ---
 
 @st.cache_data(ttl=3600)
-def load_data(ticker, period):
-    df = yf.download(ticker, period=period, interval="1d")
-    if df.empty: return None
+def fetch_terminal_data(ticker):
+    tk = yf.Ticker(ticker)
+    df = tk.history(period="1y")
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.dropna(inplace=True)
-    return df
+    return df, tk.news
 
-def apply_indicators(df):
+def process_indicators(df, whale_threshold):
     # Bollinger Bands
     df["MA20"] = df["Close"].rolling(20).mean()
     std = df["Close"].rolling(20).std()
     df["BB_High"] = df["MA20"] + (std * 2)
     df["BB_Low"] = df["MA20"] - (std * 2)
     
-    # Crossover Detection
-    df['Cross_Up'] = np.where((df['Close'] < df['BB_Low']), df['Close'], np.nan)
-    df['Cross_Down'] = np.where((df['Close'] > df['BB_High']), df['Close'], np.nan)
+    # RSI
+    delta = df["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    df["RSI"] = 100 - (100 / (1 + (gain / loss)))
     
-    # MACD & RSI
+    # MACD
     ema12 = df["Close"].ewm(span=12).mean()
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
     df["Signal"] = df["MACD"].ewm(span=9).mean()
     
-    delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df["RSI"] = 100 - (100 / (1 + (gain / loss)))
+    # Whale Alerts ($Val = Vol * Price)
+    df["Whale_Val"] = df["Volume"] * df["Close"]
+    df["Whale_Alert"] = df["Whale_Val"] > whale_threshold
+    
     return df
 
 # --- Sidebar UI ---
 with st.sidebar:
-    st.header("⚡ Terminal Settings")
+    st.header("⚡ Terminal Control")
     ticker = st.text_input("Asset Ticker", "NVDA").upper()
-    tf = st.selectbox("Historical Range", list(TIMEFRAMES.keys()), index=0)
-    chart_style = st.selectbox("Visualization", ["Candlesticks", "Hollow Line"])
-    
+    forecast_horizon = st.slider("Prediction Horizon (Days)", 1, 14, 7)
+    whale_limit = st.number_input("Whale Threshold ($)", value=5000000, step=1000000)
     st.divider()
-    st.subheader("🔮 Forecasting")
-    show_forecast = st.toggle("Enable AI Prediction", True)
-    forecast_days = st.slider("Forecast Horizon (Days)", 1, 14, 7)
-    show_bb = st.toggle("Bollinger Analysis", True)
+    st.info("Crosshair Sync: Hover over any point on the main chart to see synced data across indicators.")
 
-# --- Data Loading ---
-df_raw = load_data(ticker, TIMEFRAMES[tf])
+# --- Main Execution ---
+df_raw, news = fetch_terminal_data(ticker)
 
-if df_raw is not None and len(df_raw) > 20:
-    df = apply_indicators(df_raw.copy())
+if not df_raw.empty:
+    df = process_indicators(df_raw.copy(), whale_limit)
     
-    # --- Prediction Logic ---
-    # Using a 2nd degree polynomial (Quadratic) to predict curves rather than a flat line
-    y = df["Close"].values
-    x = np.arange(len(y))
-    poly_model = np.polyfit(x, y, 2)
+    # --- 14-Day Prediction Logic ---
+    y_vals = df["Close"].values
+    x_vals = np.arange(len(y_vals))
+    poly_fit = np.polyfit(x_vals, y_vals, 2)
+    future_x = np.arange(len(y_vals), len(y_vals) + forecast_horizon)
+    prediction = np.polyval(poly_fit, future_x)
     
-    # Generate future timestamps
-    future_x = np.arange(len(y), len(y) + forecast_days)
-    forecast_values = np.polyval(poly_model, future_x)
+    # Connector for smooth line
+    pred_x = [df.index[-1]] + [df.index[-1] + timedelta(days=i+1) for i in range(forecast_horizon)]
+    pred_y = [df["Close"].iloc[-1]] + list(prediction)
+
+    # --- MASTER CHART (Subplots) ---
+    # Creating 3 rows: Price (0.6), RSI (0.2), MACD (0.2)
+    fig = make_subplots(
+        rows=3, cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.05, 
+        row_heights=[0.6, 0.2, 0.2]
+    )
+
+    # 1. Main Price Trace
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'
+    ), row=1, col=1)
+
+    # 2. Whale Markers
+    whales = df[df["Whale_Alert"]]
+    fig.add_trace(go.Scatter(
+        x=whales.index, y=whales['Close'], mode='markers', name='Whale Tx > $5M',
+        marker=dict(color='gold', size=10, symbol='diamond', line=dict(color='white', width=1))
+    ), row=1, col=1)
+
+    # 3. AI Predictive Line (Dashed)
+    fig.add_trace(go.Scatter(
+        x=pred_x, y=pred_y, name='AI Prediction', 
+        line=dict(color='#00ffcc', width=3, dash='dashdot')
+    ), row=1, col=1)
+
+    # 4. RSI Indicator
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI', line=dict(color='#ff4b4b')), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="gray", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="gray", row=2, col=1)
+
+    # 5. MACD Indicator
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='#00d1ff')), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Signal'], name='Signal', line=dict(color='#ff9500')), row=3, col=1)
+
+    # Formatting UI for manipulation
+    fig.update_layout(
+        template="plotly_dark", height=900, 
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified", # SYNCHRONIZED CROSSHAIR
+        margin=dict(l=10, r=10, t=30, b=10)
+    )
     
-    last_date = df.index[-1]
-    future_dates = [last_date + timedelta(days=i+1) for i in range(forecast_days)]
+    # Range Selector UI
+    fig.update_xaxes(
+        rangeslider_visible=True,
+        rangeselector=dict(
+            buttons=list([
+                dict(count=1, label="1M", step="month", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(step="all")
+            ]),
+            bgcolor="#161b22"
+        ),
+        row=3, col=1 # Put slider at the very bottom
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- EDUCATIONAL SECTION ---
+    st.divider()
+    col_a, col_b = st.columns(2)
     
-    # Create forecast Series for Plotly
-    # We include the last known price to ensure the line is connected
-    forecast_x = [df.index[-1]] + future_dates
-    forecast_y = [df["Close"].iloc[-1]] + list(forecast_values)
-
-    # --- Main Dashboard ---
-    tab1, tab2 = st.tabs(["🏛 Institutional Market", "🧪 Algorithm Sandbox"])
-
-    with tab1:
-        m1, m2, m3, m4 = st.columns(4)
-        curr_price = df['Close'].iloc[-1]
-        prev_price = df['Close'].iloc[-2]
-        m1.metric("Live Price", f"${curr_price:.2f}", f"{(curr_price - prev_price):.2f}")
-        m2.metric("RSI (14)", f"{df['RSI'].iloc[-1]:.1f}")
-        m3.metric("Trend Velocity", f"{(forecast_y[-1] - curr_price):.2f}")
-        m4.metric("Volatility", f"{(df['BB_High'].iloc[-1] - df['BB_Low'].iloc[-1]):.2f}")
-
-        fig = go.Figure()
-
-        # Bollinger Bands
-        if show_bb:
-            fig.add_trace(go.Scatter(x=df.index, y=df["BB_High"], name="Upper Band", line=dict(color='rgba(255,75,75,0.3)', width=1)))
-            fig.add_trace(go.Scatter(x=df.index, y=df["BB_Low"], name="Lower Band", line=dict(color='rgba(0,255,204,0.3)', width=1), fill='tonexty', fillcolor='rgba(0, 255, 204, 0.02)'))
-
-        # Price Plot
-        if chart_style == "Candlesticks":
-            fig.add_candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price")
-        else:
-            fig.add_trace(go.Scatter(x=df.index, y=df["Close"], line=dict(color='#ffffff', width=2), name="Close"))
-
-        # VISIBLE DASHED PREDICTIVE LINE
-        if show_forecast:
-            fig.add_trace(go.Scatter(
-                x=forecast_x, 
-                y=forecast_y, 
-                name="AI Prediction", 
-                line=dict(color='#00ffcc', width=3, dash='dashdot'),
-                mode='lines'
-            ))
-
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False,
-                          margin=dict(l=0, r=0, t=20, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.line_chart(df["RSI"], height=150)
-
-    with tab2:
-        st.subheader("Risk Decision Logic")
-        # Added a simple logic check based on the prediction
-        if forecast_y[-1] > curr_price:
-            st.success(f"PROJECTION: Bullish expansion expected over the next {forecast_days} days.")
-        else:
-            st.error(f"PROJECTION: Bearish correction signaled for the next {forecast_days} days.")
+    with col_a:
+        with st.expander("📊 RSI Logic (Relative Strength Index)"):
+            st.write("""
+            **What it shows:** Momentum speed. 
+            - **Overbought (>70):** Price may be stretched too high; correction likely.
+            - **Oversold (<30):** Price may be beaten down too far; recovery likely.
+            """)
+    with col_b:
+        with st.expander("📈 MACD Logic (Momentum Divergence)"):
+            st.write("""
+            **What it shows:** Trend strength.
+            - **MACD above Signal (Blue over Orange):** Bullish momentum.
+            - **MACD below Signal:** Bearish momentum.
+            """)
 
 else:
-    st.error("Please enter a valid ticker (e.g., AAPL, NVDA, BTC-USD).")
+    st.error("Terminal Offline. Check Ticker connection.")
+
