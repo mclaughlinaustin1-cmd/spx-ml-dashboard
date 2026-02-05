@@ -206,3 +206,4 @@ with tabs[1]:
             st.session_state.trades,
             columns=["Type","Price","Shares","Time"]
         ))
+
