@@ -4,135 +4,154 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from textblob import TextBlob
 
-# --- Page Config & UI ---
-st.set_page_config(layout="wide", page_title="AI Institutional Terminal v2")
+# --- Page Config ---
+st.set_page_config(layout="wide", page_title="AI Institutional Terminal", page_icon="🏛️")
 
-st.markdown("""
-    <style>
-    .reportview-container { background: #0e1117; }
-    .metric-card { background: #161b22; border: 1px solid #30363d; padding: 20px; border-radius: 10px; }
-    .risk-high { color: #ff4b4b; font-weight: bold; }
-    .risk-low { color: #00ffcc; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- Native Sentiment Engine (No TextBlob Required) ---
+FINANCIAL_LEXICON = {
+    "positive": ["growth", "beat", "buy", "surge", "soaring", "profit", "dividend", "bullish", "expansion", "upgrade"],
+    "negative": ["drop", "miss", "sell", "plunge", "lawsuit", "debt", "bearish", "layoffs", "downgrade", "scandal"]
+}
+
+def get_native_sentiment(news_list):
+    if not news_list: return 0, "Neutral"
+    score = 0
+    for n in news_list:
+        text = n['title'].lower()
+        for word in FINANCIAL_LEXICON["positive"]:
+            if word in text: score += 1
+        for word in FINANCIAL_LEXICON["negative"]:
+            if word in text: score -= 1
+    
+    avg_score = score / len(news_list) if news_list else 0
+    label = "Bullish" if avg_score > 0.1 else "Bearish" if avg_score < -0.1 else "Neutral"
+    return avg_score, label
 
 # --- Logic Modules ---
 
-def get_data_and_news(ticker, period):
+def load_comprehensive_data(ticker):
     tk = yf.Ticker(ticker)
-    df = tk.history(period=period)
-    news = tk.news
+    df = tk.history(period="1y")
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    return df, news
+    return df, tk.news
 
-def analyze_sentiment(news_list):
-    if not news_list: return 0, "Neutral"
-    scores = [TextBlob(n['title']).sentiment.polarity for n in news_list]
-    avg_score = np.mean(scores)
-    sentiment = "Bullish" if avg_score > 0.05 else "Bearish" if avg_score < -0.05 else "Neutral"
-    return avg_score, sentiment
-
-def whale_tracker(df, threshold=5000000):
-    # Estimate transaction value: Volume * Close Price
-    df['Tx_Value'] = df['Volume'] * df['Close']
-    df['Whale_Alert'] = df['Tx_Value'] > threshold
+def apply_institutional_logic(df, whale_threshold):
+    # Bollinger Bands
+    df["MA20"] = df["Close"].rolling(20).mean()
+    std = df["Close"].rolling(20).std()
+    df["BB_High"] = df["MA20"] + (std * 2)
+    df["BB_Low"] = df["MA20"] - (std * 2)
+    
+    # Whale Tracker ($ value of volume)
+    df["Whale_Val"] = df["Volume"] * df["Close"]
+    df["Whale_Alert"] = df["Whale_Val"] > whale_threshold
+    
+    # Volatility (Annualized)
+    df["Daily_Ret"] = df["Close"].pct_change()
+    df["Vol"] = df["Daily_Ret"].rolling(20).std() * np.sqrt(252)
+    
     return df
-
-def run_risk_analysis(df, sentiment_score, vol_threshold):
-    # Logic-based Decision Tree for Risk
-    volatility = df['Close'].pct_change().std() * np.sqrt(252)
-    latest_whale = df['Whale_Alert'].iloc[-1]
-    
-    risk_points = 0
-    reasons = []
-    
-    if volatility > 0.30: 
-        risk_points += 40
-        reasons.append("High Market Volatility")
-    if sentiment_score < 0: 
-        risk_points += 20
-        reasons.append("Negative News Sentiment")
-    if latest_whale: 
-        risk_points += 30
-        reasons.append("Massive Whale Transaction Detected")
-        
-    risk_level = "High" if risk_points > 60 else "Moderate" if risk_points > 30 else "Low"
-    return risk_level, risk_points, reasons
 
 # --- Sidebar UI ---
 with st.sidebar:
     st.title("🛡️ Risk Control")
-    ticker = st.text_input("Ticker", "NVDA").upper()
-    forecast_days = st.slider("Predictive Horizon (Days)", 1, 14, 7)
+    ticker_input = st.text_input("Asset Ticker", "NVDA").upper()
+    forecast_horizon = st.slider("Predictive Trend (Days)", 1, 14, 7)
     whale_limit = st.number_input("Whale Threshold ($)", value=5000000, step=1000000)
     st.divider()
-    st.info("Decision Tree includes: Volume Spikes, Sentiment Polarity, and Annualized Volatility.")
+    st.subheader("Global Macro Factors")
+    pol_announcement = st.checkbox("Major Political News Today?", value=False)
+    market_shift = st.select_slider("Market Sentiment Shift", options=["Bearish", "Neutral", "Bullish"], value="Neutral")
 
 # --- Main Execution ---
-df, news = get_data_and_news(ticker, "1y")
+df_raw, news_data = load_comprehensive_data(ticker_input)
 
-if not df.empty:
-    df = whale_tracker(df, whale_limit)
-    sent_score, sent_label = analyze_sentiment(news)
-    risk_lv, risk_pts, risk_reasons = run_risk_analysis(df, sent_score, whale_limit)
-
-    # Autoscale & Forecast Logic
-    y = df["Close"].values
-    x = np.arange(len(y))
-    poly = np.polyfit(x, y, 2) # Quadratic for better curve
-    future_x = np.arange(len(y), len(y) + forecast_days)
-    forecast = np.polyval(poly, future_x)
-    future_dates = [df.index[-1] + timedelta(days=i+1) for i in range(forecast_days)]
+if not df_raw.empty:
+    df = apply_institutional_logic(df_raw.copy(), whale_limit)
+    sent_score, sent_label = get_native_sentiment(news_data)
+    
+    # Prediction Logic (Quadratic Trend)
+    y_vals = df["Close"].values
+    x_vals = np.arange(len(y_vals))
+    poly_coeffs = np.polyfit(x_vals, y_vals, 2)
+    future_x = np.arange(len(y_vals), len(y_vals) + forecast_horizon)
+    forecast_y = np.polyval(poly_coeffs, future_x)
+    future_dates = [df.index[-1] + timedelta(days=i+1) for i in range(forecast_horizon)]
 
     # --- UI Layout ---
     t1, t2, t3 = st.tabs(["📊 Market Analysis", "🧠 AI Sentiment", "⚠️ Risk Decision Tree"])
 
     with t1:
+        # Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Live Price", f"${df['Close'].iloc[-1]:.2f}")
+        m2.metric("Annual Vol", f"{df['Vol'].iloc[-1]*100:.1f}%")
+        m3.metric("Sentiment", sent_label)
+        m4.metric("Last Whale Tx", f"${df['Whale_Val'].iloc[-1]/1e6:.1f}M")
+
+        # Visuals
         fig = go.Figure()
-        # Price
-        fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Price", line=dict(color='white')))
-        # Forecast
-        fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="AI Prediction", line=dict(dash='dot', color='cyan')))
-        # Whale Markers
-        whales = df[df['Whale_Alert']]
-        fig.add_trace(go.Scatter(x=whales.index, y=whales['Close'], mode='markers', 
-                                 name="Whale Tx > $5M", marker=dict(color='gold', size=10, symbol='diamond')))
+        # Price & Forecast
+        fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Historical", line=dict(color='white', width=1.5)))
+        fig.add_trace(go.Scatter(x=future_dates, y=forecast_y, name="Predictive Trend", line=dict(dash='dash', color='#00ffcc')))
+        # Whale Highlighters
+        whales = df[df["Whale_Alert"]]
+        fig.add_trace(go.Scatter(x=whales.index, y=whales["Close"], mode="markers", name="Whale Spike", marker=dict(color="gold", size=8)))
         
-        fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+        fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=20, b=0))
         st.plotly_chart(fig, use_container_width=True)
 
     with t2:
-        st.subheader(f"Global Sentiment: {sent_label}")
-        st.progress((sent_score + 1) / 2) # Normalize -1to1 to 0to1
-        for n in news[:5]:
-            st.write(f"📰 **{n['title']}**")
-            st.caption(f"Source: {n['publisher']} | [Link]({n['link']})")
+        st.subheader("Keyword-Based News Analysis")
+        cols = st.columns(len(news_data[:6]))
+        for idx, n in enumerate(news_data[:6]):
+            with st.container():
+                st.markdown(f"**{n['publisher']}**: {n['title']}")
+                st.caption(f"[Read Article]({n['link']})")
+                st.divider()
 
     with t3:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.header("Risk Analysis")
-            st.metric("Risk Score", f"{risk_pts}/100", delta=risk_lv, delta_color="inverse")
-            for r in risk_reasons:
-                st.write(f"🚩 {r}")
+        st.subheader("Decision Logic Tree")
         
-        with col2:
-            st.subheader("Automated Decision Path")
-            # Visualizing the 'Logic Tree'
+        # Risk Scoring Calculation
+        risk_score = 0
+        if df['Vol'].iloc[-1] > 0.4: risk_score += 30
+        if sent_label == "Bearish": risk_score += 20
+        if df['Whale_Alert'].iloc[-1]: risk_score += 20
+        if pol_announcement: risk_score += 15
+        if market_shift == "Bearish": risk_score += 15
+        
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.metric("Aggregate Risk Score", f"{risk_score}/100")
+            if risk_score > 60:
+                st.error("RATING: HIGH RISK - AVOID")
+            elif risk_score > 30:
+                st.warning("RATING: MODERATE - CAUTION")
+            else:
+                st.success("RATING: LOW RISK - ACCUMULATE")
+
+        with c2:
+            st.markdown("### Risk Analysis Visualization")
+            # Creating a decision tree visual representation
             st.code(f"""
-IF Volatility > 30%  --> { "FAIL" if "High Market Volatility" in risk_reasons else "PASS" }
-IF Sentiment > 0.0  --> { "PASS" if sent_score > 0 else "FAIL" }
-IF Whale Spike < {whale_limit} --> { "PASS" if not df['Whale_Alert'].iloc[-1] else "FAIL" }
----------------------------
-FINAL DECISION: { "HOLD/WATCH" if risk_lv == "High" else "EXECUTE TRADE" }
+            [START: {ticker_input} Analysis]
+               |
+               |-- Volatility > 40%? ----> {'[YES] +30pts' if df['Vol'].iloc[-1] > 0.4 else '[NO]'}
+               |-- Sentiment Bearish? ---> {'[YES] +20pts' if sent_label == "Bearish" else '[NO]'}
+               |-- Political Unrest? ----> {'[YES] +15pts' if pol_announcement else '[NO]'}
+               |-- Whale Movement? ------> {'[YES] +20pts' if df['Whale_Alert'].iloc[-1] else '[NO]'}
+               |
+            [TOTAL SCORE: {risk_score}]
             """)
             
-        # Risk Heatmap (Running Volatility)
-        df['Vol'] = df['Close'].pct_change().rolling(20).std()
-        st.line_chart(df['Vol'], use_container_width=True)
+        
+
+        # Final Running Trend with Volatility overlay
+        st.subheader("Running Volatility & Risk Trend")
+        st.line_chart(df['Vol'])
 
 else:
-    st.error("Invalid Ticker or No Data Found.")
+    st.error("Ticker not found. Please check your spelling.")
