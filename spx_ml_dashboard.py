@@ -18,7 +18,6 @@ st.title("📈 AI Trading Platform - TradingView Style")
 def load_data(ticker, days):
     end = datetime.today()
     start = end - timedelta(days=days)
-    # Intraday for short ranges
     interval = "1h" if days <= 30 else "1d"
     df = yf.download(ticker, start=start, end=end, interval=interval)
     if isinstance(df.columns, pd.MultiIndex):
@@ -29,6 +28,13 @@ def load_data(ticker, days):
 def add_indicators(df):
     df = df.copy()
     close = df["Close"]
+    if len(close) < 14:
+        df["RSI"] = np.nan
+        df["MACD"] = np.nan
+        df["Signal"] = np.nan
+        df["Returns"] = np.nan
+        df["Volatility"] = np.nan
+        return df
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -47,13 +53,15 @@ def add_indicators(df):
 # ===================== TREND MODEL =====================
 def trend_probability(df):
     df = df.copy()
+    if len(df) < 10:
+        return 0.5
     df["Future"] = df["Close"].shift(-3)
     df["Target"] = (df["Future"] > df["Close"]).astype(int)
     df = df.dropna()
-    if len(df) < 10: return 0.5
     features = ["RSI","MACD","Signal","Volatility"]
     X = df[features].dropna()
     y = df.loc[X.index,"Target"]
+    if len(X) < 1: return 0.5
     scaler = MinMaxScaler()
     X_scaled = scaler.fit_transform(X)
     model = RandomForestClassifier(n_estimators=200, random_state=42)
@@ -64,17 +72,21 @@ def trend_probability(df):
 
 # ===================== SIGNALS & RISK =====================
 def signal(rsi, macd, sig):
+    if pd.isna(rsi) or pd.isna(macd) or pd.isna(sig):
+        return "N/A"
     if rsi < 30 and macd > sig: return "BUY"
     if rsi > 70 and macd < sig: return "SELL"
     return "HOLD"
 
 def risk_level(vol):
+    if pd.isna(vol): return "N/A"
     if vol < 0.01: return "LOW"
     if vol < 0.025: return "MEDIUM"
     return "HIGH"
 
 # ===================== BACKTEST =====================
 def backtest(df):
+    if len(df) < 50: return "N/A"
     cash = 10000
     shares = 0
     for i in range(len(df)):
@@ -107,6 +119,7 @@ def paper_trade(ticker, price, action):
 # ===================== PORTFOLIO OPTIMIZER =====================
 def optimize_portfolio(prices):
     returns = prices.pct_change().dropna()
+    if returns.empty: return [1/len(prices.columns)]*len(prices.columns)
     cov = returns.cov()
     n = len(returns.columns)
     def risk(weights): return np.sqrt(np.dot(weights.T, np.dot(cov, weights)))
@@ -157,16 +170,16 @@ def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=
     df_plot = df.iloc[-50:] if zoom else df
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Price"))
 
-    if show_macd:
+    if show_macd and "MACD" in df_plot and "Signal" in df_plot:
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MACD"], name="MACD"))
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Signal"], name="Signal"))
 
-    if show_rsi:
+    if show_rsi and "RSI" in df_plot:
         fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["RSI"], name="RSI"))
 
     if show_signals:
-        buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index
-        sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index
+        buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index if "RSI" in df_plot else []
+        sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index if "RSI" in df_plot else []
         fig.add_trace(go.Scatter(x=buy_idx, y=df_plot.loc[buy_idx,"Close"], mode="markers",
                                  marker=dict(color="green", size=10), name="BUY Signal"))
         fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
@@ -178,8 +191,7 @@ def plot_chart(df, ticker, lstm_pred=None, zoom=False, show_rsi=True, show_macd=
 
     fig.update_layout(title=f"{ticker} Chart", hovermode="x unified",
                       xaxis=dict(rangeslider=dict(visible=True), type="date"))
-
-    st.plotly_chart(fig, use_container_width=True, key=key)  # ✅ unique key
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 # ===================== UI =====================
 with st.sidebar:
@@ -211,15 +223,26 @@ if run:
 
     for t in tickers:
         df = load_data(t, days)
-        if len(df)<50:
-            st.warning(f"{t}: Less than 50 data points, skipping LSTM/backtest")
+        if df.empty:
+            st.warning(f"{t}: No data available for selected range")
+            continue
+
         df = add_indicators(df)
-        prob_up = trend_probability(df)
-        sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1])
-        risk = risk_level(df["Volatility"].iloc[-1])
-        bt_val = backtest(df) if len(df)>=50 else "N/A"
+        # Safe signal & probability
+        if df.empty or "RSI" not in df or df["RSI"].isna().all():
+            sig = "N/A"
+            prob_up = 0.5
+            risk = "N/A"
+            bt_val = "N/A"
+            lstm_pred = []
+        else:
+            prob_up = trend_probability(df)
+            sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1])
+            risk = risk_level(df["Volatility"].iloc[-1])
+            bt_val = backtest(df)
+            lstm_pred = lstm_forecast_cached(df["Close"].values)
+
         news = news_sentiment(t)
-        lstm_pred = lstm_forecast_cached(df["Close"].values) if len(df)>=50 else []
 
         results.append([t, round(prob_up*100,1), sig, risk, bt_val, news])
 
