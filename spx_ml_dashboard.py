@@ -5,15 +5,15 @@ import numpy as np
 from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import MinMaxScaler
+from scipy.optimize import minimize
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="AI Trading Dashboard", layout="wide")
-st.title("📊 AI Trading Intelligence Platform")
+st.set_page_config("AI Trading Platform", layout="wide")
 
-# ================= DATA =================
+# ===================== DATA =====================
 
 @st.cache_data(ttl=1800)
-def fetch_data(ticker, days):
+def load_data(ticker, days):
     end = datetime.today()
     start = end - timedelta(days=days)
     df = yf.download(ticker, start=start, end=end)
@@ -23,9 +23,9 @@ def fetch_data(ticker, days):
 
     return df.dropna()
 
-# ================= INDICATORS =================
+# ===================== INDICATORS =====================
 
-def add_indicators(df):
+def indicators(df):
     close = df["Close"]
 
     delta = close.diff()
@@ -34,8 +34,8 @@ def add_indicators(df):
 
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
-
     rs = avg_gain / avg_loss
+
     df["RSI"] = 100 - (100 / (1 + rs))
 
     ema12 = close.ewm(span=12).mean()
@@ -46,145 +46,159 @@ def add_indicators(df):
     df["Returns"] = close.pct_change()
     df["Volatility"] = df["Returns"].rolling(20).std()
 
-    df = df.dropna()
-    return df
+    return df.dropna()
 
-# ================= ML TREND MODEL =================
+# ===================== AI TREND MODEL =====================
 
-def train_trend_model(df):
+def trend_probability(df):
     df["Future"] = df["Close"].shift(-3)
     df["Target"] = (df["Future"] > df["Close"]).astype(int)
     df = df.dropna()
 
-    features = ["RSI", "MACD", "Signal", "Volatility"]
+    features = ["RSI","MACD","Signal","Volatility"]
     X = df[features]
     y = df["Target"]
 
     scaler = MinMaxScaler()
     X = scaler.fit_transform(X)
 
-    model = RandomForestClassifier(n_estimators=300, random_state=42)
-    model.fit(X, y)
+    model = RandomForestClassifier(n_estimators=300)
+    model.fit(X,y)
 
     latest = scaler.transform(df[features].iloc[-1:].values)
-    prob_up = model.predict_proba(latest)[0][1]
+    return model.predict_proba(latest)[0][1]
 
-    return prob_up
+# ===================== SIGNALS =====================
 
-# ================= SIGNAL LOGIC =================
+def signal(rsi, macd, sig):
+    if rsi < 30 and macd > sig:
+        return "BUY"
+    if rsi > 70 and macd < sig:
+        return "SELL"
+    return "HOLD"
 
-def trading_signal(rsi, macd, signal):
-    if rsi < 30 and macd > signal:
-        return "🟢 BUY"
-    elif rsi > 70 and macd < signal:
-        return "🔴 SELL"
-    else:
-        return "🟡 HOLD"
+# ===================== BACKTEST =====================
 
-def risk_level(vol):
-    if vol < 0.01:
-        return "LOW"
-    elif vol < 0.025:
-        return "MEDIUM"
-    else:
-        return "HIGH"
+def backtest(df):
+    cash = 10000
+    shares = 0
 
-# ================= NEWS SENTIMENT =================
+    for i in range(len(df)):
+        s = signal(df["RSI"].iloc[i], df["MACD"].iloc[i], df["Signal"].iloc[i])
+        price = df["Close"].iloc[i]
 
-def news_sentiment(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        news = stock.news[:5]
+        if s == "BUY" and cash > 0:
+            shares = cash / price
+            cash = 0
+        elif s == "SELL" and shares > 0:
+            cash = shares * price
+            shares = 0
 
-        positive = 0
-        negative = 0
+    final = cash + shares * df["Close"].iloc[-1]
+    return round(final,2)
 
-        for n in news:
-            title = n["title"].lower()
-            if any(w in title for w in ["up", "beats", "growth", "surge", "profit"]):
-                positive += 1
-            if any(w in title for w in ["down", "miss", "drop", "loss", "fall"]):
-                negative += 1
+# ===================== PAPER TRADING =====================
 
-        if positive > negative:
-            return "📈 Positive"
-        elif negative > positive:
-            return "📉 Negative"
-        else:
-            return "⚖ Neutral"
+if "balance" not in st.session_state:
+    st.session_state.balance = 10000
+    st.session_state.shares = {}
 
-    except:
-        return "⚖ Neutral"
+def paper_trade(ticker, price, action):
+    if ticker not in st.session_state.shares:
+        st.session_state.shares[ticker] = 0
 
-# ================= PLOT =================
+    if action == "BUY":
+        qty = st.session_state.balance / price
+        st.session_state.shares[ticker] += qty
+        st.session_state.balance = 0
 
-def plot_chart(df, ticker):
+    elif action == "SELL":
+        st.session_state.balance += st.session_state.shares[ticker] * price
+        st.session_state.shares[ticker] = 0
+
+# ===================== PORTFOLIO OPTIMIZER =====================
+
+def optimize_portfolio(prices):
+    returns = prices.pct_change().dropna()
+    cov = returns.cov()
+    mean = returns.mean()
+
+    n = len(mean)
+
+    def risk(weights):
+        return np.sqrt(np.dot(weights.T, np.dot(cov, weights)))
+
+    cons = {"type":"eq","fun":lambda w: np.sum(w)-1}
+    bounds = [(0,1)]*n
+    w0 = np.ones(n)/n
+
+    res = minimize(risk, w0, bounds=bounds, constraints=cons)
+    return res.x
+
+# ===================== CHART =====================
+
+def chart(df, ticker):
     fig = go.Figure()
-
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Price"))
     fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
     fig.add_trace(go.Scatter(x=df.index, y=df["Signal"], name="Signal"))
-
-    fig.update_layout(
-        title=f"{ticker} Price & Indicators",
-        hovermode="x unified"
-    )
-
+    fig.update_layout(title=f"{ticker} Chart", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
 
-# ================= UI =================
+# ===================== UI =====================
 
-with st.sidebar:
-    tickers = st.text_input("Stock tickers (comma separated)", "AAPL,MSFT").upper()
-    days = st.selectbox("History range", [180, 365, 730, 1825], index=1)
-    run = st.button("Run Analysis")
+st.title("📈 AI Trading Platform")
 
-# ================= APP =================
+colA, colB = st.columns([2,1])
+
+with colB:
+    tickers = st.text_input("Tickers (comma)", "AAPL,MSFT,GOOG")
+    days = st.selectbox("History", [180,365,730,1825], index=1)
+    run = st.button("Run Platform")
+
+with colA:
+    st.subheader("Market Dashboard")
+
+# ===================== APP =====================
 
 if run:
-    stocks = [t.strip() for t in tickers.split(",")]
+    tickers = [t.strip() for t in tickers.split(",")]
+    portfolio_prices = pd.DataFrame()
 
-    results = []
+    for t in tickers:
+        df = indicators(load_data(t, days))
 
-    for ticker in stocks:
-        df = fetch_data(ticker, days)
+        prob = trend_probability(df)
+        sig = signal(df["RSI"].iloc[-1], df["MACD"].iloc[-1], df["Signal"].iloc[-1])
+        backtest_value = backtest(df)
 
-        if df.empty or len(df) < 80:
-            st.warning(f"{ticker}: not enough data")
-            continue
+        st.markdown(f"### {t}")
+        st.write(f"Trend Up Probability: {round(prob*100,1)}%")
+        st.write(f"Signal: {sig}")
+        st.write(f"Backtest $10k → ${backtest_value}")
 
-        df = add_indicators(df)
+        chart(df, t)
 
-        prob_up = train_trend_model(df)
+        portfolio_prices[t] = df["Close"]
 
-        rsi = df["RSI"].iloc[-1]
-        macd = df["MACD"].iloc[-1]
-        signal_line = df["Signal"].iloc[-1]
-        vol = df["Volatility"].iloc[-1]
+        if st.button(f"Paper BUY {t}"):
+            paper_trade(t, df["Close"].iloc[-1], "BUY")
+        if st.button(f"Paper SELL {t}"):
+            paper_trade(t, df["Close"].iloc[-1], "SELL")
 
-        signal = trading_signal(rsi, macd, signal_line)
-        risk = risk_level(vol)
-        sentiment = news_sentiment(ticker)
+    st.subheader("💰 Paper Trading Portfolio")
+    st.write("Cash:", round(st.session_state.balance,2))
+    st.write("Holdings:", st.session_state.shares)
 
-        results.append([
-            ticker,
-            round(prob_up * 100, 1),
-            signal,
-            risk,
-            sentiment
-        ])
+    if len(portfolio_prices.columns) > 1:
+        weights = optimize_portfolio(portfolio_prices)
+        st.subheader("📊 Optimized Portfolio Weights")
 
-        st.subheader(f"{ticker} Chart")
-        plot_chart(df, ticker)
+        opt = pd.DataFrame({
+            "Ticker": portfolio_prices.columns,
+            "Weight": np.round(weights,3)
+        })
 
-    if results:
-        st.subheader("📊 AI Market Overview")
+        st.dataframe(opt, use_container_width=True)
 
-        table = pd.DataFrame(
-            results,
-            columns=["Ticker", "Trend Up %", "Signal", "Risk", "News Sentiment"]
-        )
-
-        st.dataframe(table, use_container_width=True)
-
-        st.success("Analysis complete!")
+    st.success("Platform running!")
