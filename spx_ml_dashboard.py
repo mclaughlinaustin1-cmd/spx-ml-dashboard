@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 
 # ----------------- Page Setup -----------------
 st.set_page_config(page_title="Ultimate AI Trading Dashboard", layout="wide")
-st.title("🚀 Ultimate AI Trading + Candlestick + Paper Trading Simulator")
+st.title("🚀 Ultimate AI Trading + Candlestick + Real-Time P/L Overlay")
 
 # ----------------- Data Loader -----------------
 @st.cache_data(ttl=1800)
@@ -111,14 +111,18 @@ def lstm_forecast(prices, steps=7):
 # ----------------- Paper Trading -----------------
 if "sim_cash" not in st.session_state:
     st.session_state.sim_cash = 10000
+if "sim_holdings" not in st.session_state:
     st.session_state.sim_holdings = {}
+if "trade_log" not in st.session_state:
+    st.session_state.trade_log = []
 
-def paper_trade(ticker, action, amount):
-    df = load_data(ticker, 30)
-    if df.empty: return
+def paper_trade(ticker, action, amount, df):
+    if df.empty:
+        st.warning("Not enough data to execute trade!")
+        return
     price = df["Close"].iloc[-1]
+    qty = amount / price
     if action=="BUY":
-        qty = amount / price
         if st.session_state.sim_cash >= amount:
             st.session_state.sim_cash -= amount
             if ticker not in st.session_state.sim_holdings:
@@ -128,18 +132,21 @@ def paper_trade(ticker, action, amount):
             total_qty = current['qty'] + qty
             current['qty'] = total_qty
             current['avg_price'] = total_cost / total_qty
+            st.session_state.trade_log.append((df.index[-1],ticker,"BUY",price,qty))
     elif action=="SELL":
         if ticker in st.session_state.sim_holdings:
             current = st.session_state.sim_holdings[ticker]
             if current['qty']>0:
-                sell_qty = min(amount/price, current['qty'])
+                sell_qty = min(qty, current['qty'])
                 current['qty'] -= sell_qty
                 st.session_state.sim_cash += sell_qty*price
+                st.session_state.trade_log.append((df.index[-1],ticker,"SELL",price,sell_qty))
+    st.success(f"{action} executed: {amount} USD @ {price:.2f} per share")
 
 # ----------------- Plot Chart -----------------
 def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
                show_rsi=True, show_macd=True, show_signals=True,
-               show_forecast=True, key=None, zoom=False):
+               show_forecast=True, key=None, zoom=False, overlay_trades=True):
 
     df_plot = df.iloc[-50:] if zoom else df
     fig = go.Figure()
@@ -166,9 +173,9 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
     buy_idx = df_plot[(df_plot["RSI"]<30) & (df_plot["MACD"]>df_plot["Signal"])].index
     sell_idx = df_plot[(df_plot["RSI"]>70) & (df_plot["MACD"]<df_plot["Signal"])].index
     fig.add_trace(go.Scatter(x=buy_idx, y=df_plot.loc[buy_idx,"Close"], mode="markers",
-                             marker=dict(size=12,color="green"), name="BUY"))
+                             marker=dict(size=12,color="green"), name="Signal BUY"))
     fig.add_trace(go.Scatter(x=sell_idx, y=df_plot.loc[sell_idx,"Close"], mode="markers",
-                             marker=dict(size=12,color="red"), name="SELL"))
+                             marker=dict(size=12,color="red"), name="Signal SELL"))
 
     # Whale Proxy
     unusual_idx = df_plot[df_plot["Unusual"]].index
@@ -176,19 +183,41 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
                              marker=dict(size=14,color="purple",symbol="diamond"), name="Whale Proxy"))
 
     # LSTM Forecast
-    if show_forecast and lstm_pred is not None:
+    if show_forecast and lstm_pred is not None and len(lstm_pred)>0:
         future_dates = [df_plot.index[-1] + pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
         fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, mode="lines+markers", name="LSTM Forecast"))
 
+    # Overlay Paper Trades + Real-time P/L
+    if overlay_trades and st.session_state.trade_log:
+        for dt, tick, act, price, qty in st.session_state.trade_log:
+            if tick==ticker:
+                color = "blue" if act=="BUY" else "orange"
+                symbol = "triangle-up" if act=="BUY" else "triangle-down"
+                current_price = df_plot["Close"].iloc[-1] if df_plot.index[-1]>=dt else price
+                pl = (current_price-price)*qty if act=="BUY" else (price-current_price)*qty
+                fig.add_trace(go.Scatter(
+                    x=[dt], y=[price],
+                    mode="markers+text",
+                    marker=dict(size=14,color=color,symbol=symbol),
+                    text=[f"{act}\nP/L:{pl:.2f}"],
+                    textposition="top center",
+                    name=f"Paper {act}"))
+
     # Autoscale Y-axis: $1 buffer above/below all points
     all_y = df_plot["Close"].tolist()
-    if lstm_pred is not None: all_y += lstm_pred.tolist()
+    if lstm_pred is not None and len(lstm_pred)>0: all_y += lstm_pred.tolist()
     if len(buy_idx)>0: all_y += df_plot.loc[buy_idx,"Close"].tolist()
     if len(sell_idx)>0: all_y += df_plot.loc[sell_idx,"Close"].tolist()
     if len(unusual_idx)>0: all_y += df_plot.loc[unusual_idx,"Close"].tolist()
+    if overlay_trades:
+        for dt, tick, act, price, qty in st.session_state.trade_log:
+            if tick==ticker:
+                all_y.append(price)
+                # Include P/L
+                current_price = df_plot["Close"].iloc[-1] if df_plot.index[-1]>=dt else price
+                pl = (current_price-price)*qty if act=="BUY" else (price-current_price)*qty
+                all_y.append(price+pl)
     y_min, y_max = min(all_y)-1, max(all_y)+1
-
-    # X-axis autoscale (zoomed or full)
     x_min = df_plot.index.min()
     x_max = df_plot.index.max()
 
@@ -223,7 +252,8 @@ with st.sidebar:
     - **Volatility:** Risk  
     - **Buy/Sell Signals:** Generated by RSI+MACD  
     - **Whale Proxy:** Large volume spike  
-    - **LSTM Forecast:** AI future price
+    - **LSTM Forecast:** AI future price  
+    - **Paper Trades:** Blue=BUY, Orange=SELL with P/L overlay
     """)
 
 # ----------------- Main -----------------
@@ -246,26 +276,29 @@ if run:
             plot_chart(df, t, lstm_pred, chart_type, zoom=False,
                        show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_full")
+                       key=f"{t}_full", overlay_trades=True)
         with tab2:
             plot_chart(df, t, lstm_pred, chart_type, zoom=True,
                        show_rsi=show_rsi, show_macd=show_macd,
                        show_signals=show_signals, show_forecast=show_forecast,
-                       key=f"{t}_zoom")
+                       key=f"{t}_zoom", overlay_trades=True)
         with tab3:
             st.header(f"🧪 Paper Trading Simulator for {t}")
-            sim_action = st.radio("Action", ["BUY","SELL"], key=f"{t}_action")
-            sim_amount = st.number_input("Amount to trade ($)", 100, step=100, key=f"{t}_amt")
-            if st.button("Execute Trade", key=f"{t}_btn"):
-                paper_trade(t, sim_action, sim_amount)
-            st.subheader("💼 Portfolio Overview")
-            st.write("Cash:", round(st.session_state.sim_cash,2))
-            holdings_list = []
-            for h_t,h in st.session_state.sim_holdings.items():
-                price = load_data(h_t, 30)["Close"].iloc[-1] if not load_data(h_t,30).empty else h['avg_price']
-                pl_percent = (price - h['avg_price'])/h['avg_price']*100 if h['avg_price']>0 else 0
-                holdings_list.append([h_t,h['qty'],h['avg_price'],price,round(pl_percent,2)])
-            st.dataframe(pd.DataFrame(holdings_list, columns=["Ticker","Qty","Avg Price","Current Price","P/L %"]))
+            container = st.container()
+            with container:
+                sim_action = st.radio("Action", ["BUY","SELL"], key=f"{t}_action")
+                sim_amount = st.number_input("Amount to trade ($)", 100, step=100, key=f"{t}_amt")
+                if st.button("Execute Trade", key=f"{t}_btn"):
+                    paper_trade(t, sim_action, sim_amount, df)
+                st.subheader("💼 Portfolio Overview")
+                st.write("Cash:", round(st.session_state.sim_cash,2))
+                holdings_list = []
+                for h_t,h in st.session_state.sim_holdings.items():
+                    df_h = load_data(h_t, 30)
+                    price = df_h["Close"].iloc[-1] if not df_h.empty else h['avg_price']
+                    pl_percent = (price - h['avg_price'])/h['avg_price']*100 if h['avg_price']>0 else 0
+                    holdings_list.append([h_t,h['qty'],h['avg_price'],price,round(pl_percent,2)])
+                st.dataframe(pd.DataFrame(holdings_list, columns=["Ticker","Qty","Avg Price","Current Price","P/L %"]))
 
         if sig=="BUY" and prob_up>0.6: st.info(f"🚨 {t} strong BUY ({round(prob_up*100,1)}%)")
         if sig=="SELL" and prob_up<0.4: st.warning(f"⚠ {t} strong SELL ({round(prob_up*100,1)}%)")
