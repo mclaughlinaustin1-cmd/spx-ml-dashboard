@@ -20,7 +20,8 @@ chart_mode = st.sidebar.radio("Chart Type", ["Candlestick", "Line"])
 @st.cache_data
 def fetch_data(symbol, days):
     df = yf.download(symbol, period=f"{days}d", progress=False)
-    df.reset_index(inplace=True)
+    df = df.reset_index()
+    df = df.astype({col: "float64" for col in df.columns if col != "Date"})
     return df
 
 df = fetch_data(ticker, history_days)
@@ -29,26 +30,28 @@ if df.empty:
     st.error("No data loaded")
     st.stop()
 
-close = df["Close"]
+close = df["Close"].astype(float)
 
-# ========== BOLLINGER BANDS (NO DF ASSIGNMENTS) ==========
+# ========== BOLLINGER BANDS ==========
 
 ma20 = close.rolling(20, min_periods=1).mean()
-std = close.rolling(20, min_periods=1).std()
+std = close.rolling(20, min_periods=1).std().fillna(0)
 
 bb_upper = ma20 + 2 * std
 bb_lower = ma20 - 2 * std
 
-# ========== SIMPLE FORECAST ==========
+# ========== FORECAST (ROBUST) ==========
 
 x = np.arange(len(close))
-slope, intercept = np.polyfit(x, close.values, 1)
+y = close.values.astype(float)
 
-future_x = np.arange(len(close), len(close) + forecast_days)
+slope, intercept = np.polyfit(x, y, 1)
+
+future_x = np.arange(len(y), len(y) + forecast_days)
 forecast = slope * future_x + intercept
 
 future_dates = [
-    df["Date"].iloc[-1] + timedelta(days=i+1)
+    df["Date"].iloc[-1] + timedelta(days=i + 1)
     for i in range(forecast_days)
 ]
 
@@ -62,7 +65,7 @@ if chart_mode == "Candlestick":
         open=df["Open"],
         high=df["High"],
         low=df["Low"],
-        close=df["Close"],
+        close=close,
         name="Price"
     ))
 else:
@@ -92,12 +95,14 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# ========== METRICS ==========
+# ========== METRICS (SAFE CASTED) ==========
+
+current_price = float(close.iloc[-1])
+ma_value = float(ma20.iloc[-1])
+forecast_end = float(forecast[-1])
 
 col1, col2, col3 = st.columns(3)
 
-col1.metric("Current Price", f"${close.iloc[-1]:.2f}")
-col2.metric("MA20", f"${ma20.iloc[-1]:.2f}")
-col3.metric("Forecast End", f"${forecast[-1]:.2f}")
-
-
+col1.metric("Current Price", f"${current_price:.2f}")
+col2.metric("MA20", f"${ma_value:.2f}")
+col3.metric("Forecast End", f"${forecast_end:.2f}")
