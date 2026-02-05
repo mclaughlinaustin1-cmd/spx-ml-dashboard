@@ -180,7 +180,7 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
         future_dates = [df_plot.index[-1] + pd.Timedelta(days=i+1) for i in range(len(lstm_pred))]
         fig.add_trace(go.Scatter(x=future_dates, y=lstm_pred, mode="lines+markers", name="LSTM Forecast"))
 
-    # Autoscale Y-axis above all markers + $1 buffer
+    # Autoscale Y-axis: $1 buffer above/below all points
     all_y = df_plot["Close"].tolist()
     if lstm_pred is not None: all_y += lstm_pred.tolist()
     if len(buy_idx)>0: all_y += df_plot.loc[buy_idx,"Close"].tolist()
@@ -188,15 +188,19 @@ def plot_chart(df, ticker, lstm_pred=None, chart_type="line",
     if len(unusual_idx)>0: all_y += df_plot.loc[unusual_idx,"Close"].tolist()
     y_min, y_max = min(all_y)-1, max(all_y)+1
 
+    # X-axis autoscale (zoomed or full)
+    x_min = df_plot.index.min()
+    x_max = df_plot.index.max()
+
     fig.update_layout(
         title=f"{ticker} Price & Signals",
         hovermode="x unified",
-        xaxis=dict(rangeslider=dict(visible=True)),
+        xaxis=dict(range=[x_min, x_max], rangeslider=dict(visible=True)),
         yaxis=dict(range=[y_min, y_max], fixedrange=False)
     )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
-# ----------------- Sidebar Controls -----------------
+# ----------------- Sidebar -----------------
 with st.sidebar:
     tickers_input = st.text_input("Tickers (comma)", "AAPL,MSFT,GOOG")
     range_options = {"24 hours":1,"1 week":7,"1 month":30,"6 months":182,"1 year":365,"3 years":1095,"5 years":1825}
