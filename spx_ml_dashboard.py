@@ -40,9 +40,9 @@ def add_indicators(df):
     df["MA50"] = df["Close"].rolling(window=50, min_periods=1).mean()
 
     # Bollinger Bands (robust)
-    rolling_std = df["Close"].rolling(20, min_periods=1).std().to_numpy().ravel()
-    df["BB_upper"] = df["MA20"].to_numpy().ravel() + 2 * rolling_std
-    df["BB_lower"] = df["MA20"].to_numpy().ravel() - 2 * rolling_std
+    rolling_std = df["Close"].rolling(20, min_periods=1).std()
+    df["BB_upper"] = df["MA20"] + 2 * rolling_std
+    df["BB_lower"] = df["MA20"] - 2 * rolling_std
 
     # RSI
     delta = df["Close"].diff().fillna(0)
@@ -74,10 +74,10 @@ def plot_chart(df, forecast_dates=None, forecast_values=None, trades=None, chart
     ymin = df["Low"].min()
     ymax = df["High"].max()
 
-    # Include forecast in autoscale
+    # Include forecast safely
     if forecast_values is not None and len(forecast_values) > 0:
-        ymin = min(ymin, np.min(forecast_values))
-        ymax = max(ymax, np.max(forecast_values))
+        ymin = min(ymin, float(np.min(forecast_values)))
+        ymax = max(ymax, float(np.max(forecast_values)))
 
     # Include Bollinger Bands
     if "BB_lower" in df.columns and "BB_upper" in df.columns:
@@ -217,4 +217,3 @@ with tabs[1]:
     if st.session_state.trades:
         st.subheader("Trade Log")
         st.table(pd.DataFrame(st.session_state.trades, columns=["Type","Price","Shares","Time"]))
-
