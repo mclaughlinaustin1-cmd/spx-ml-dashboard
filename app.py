@@ -1,67 +1,194 @@
 import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
+from datetime import datetime, timedelta
 
-from data import load
-from features import build
-from models import train
-from strategies import apply
-from risk import position_size
-from backtest import run
+st.set_page_config(layout="wide", page_title="AI Trading Platform Pro")
 
-st.set_page_config(layout="wide")
+# ---------------------------
+# Helpers
+# ---------------------------
 
-st.sidebar.title("🏦 Institutional AI Trading System")
+TIMEFRAMES = {
+    "24 Hours": "1d",
+    "1 Week": "5d",
+    "1 Month": "1mo",
+    "6 Months": "6mo",
+    "1 Year": "1y",
+    "3 Years": "3y",
+    "5 Years": "5y"
+}
+
+def load_data(ticker, period):
+    df = yf.download(ticker, period=period, interval="1h" if period in ["1d","5d"] else "1d")
+    df.dropna(inplace=True)
+    return df
+
+def indicators(df):
+    df["MA20"] = df["Close"].rolling(20).mean()
+    df["MA50"] = df["Close"].rolling(50).mean()
+
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    rs = gain / loss
+    df["RSI"] = 100 - (100/(1+rs))
+
+    ema12 = df["Close"].ewm(span=12).mean()
+    ema26 = df["Close"].ewm(span=26).mean()
+    df["MACD"] = ema12 - ema26
+    df["Signal"] = df["MACD"].ewm(span=9).mean()
+
+    return df
+
+def naive_forecast(df, steps=20):
+    trend = np.polyfit(range(len(df)), df["Close"], 1)
+    future_x = np.arange(len(df), len(df)+steps)
+    preds = trend[0]*future_x + trend[1]
+    future_dates = [df.index[-1] + timedelta(days=i+1) for i in range(steps)]
+    return future_dates, preds
+
+# ---------------------------
+# UI
+# ---------------------------
+
+st.title("📈 Institutional AI Trading Dashboard")
 
 ticker = st.sidebar.text_input("Ticker", "AAPL")
-period = st.sidebar.selectbox("Range", ["1y","3y","5y"])
+tf_label = st.sidebar.selectbox("Timeframe", list(TIMEFRAMES.keys()))
+chart_type = st.sidebar.radio("Chart Type", ["Candles", "Line"])
 
-df = load(ticker, period)
-df = build(df)
-df = train(df)
-df = apply(df)
-df = position_size(df)
-df, stats = run(df)
+show_rsi = st.sidebar.checkbox("Show RSI", True)
+show_macd = st.sidebar.checkbox("Show MACD", True)
+show_forecast = st.sidebar.checkbox("Show Forecast", True)
 
-tabs = st.tabs([
-    "📊 Trading Signals",
-    "📈 Portfolio Backtest",
-    "📋 Strategy Analytics"
-])
+tabs = st.tabs(["📊 Market", "💰 Paper Trading Simulator"])
 
-# ===== CHART ===== #
+# ---------------------------
+# Load Data
+# ---------------------------
+
+df = load_data(ticker, TIMEFRAMES[tf_label])
+df = indicators(df)
+
+future_dates, forecast = naive_forecast(df)
+
+# ---------------------------
+# AUTOSCALE (tight + safe)
+# ---------------------------
+
+ymin = df["Low"].min()
+ymax = df["High"].max()
+
+if show_forecast:
+    ymin = min(ymin, forecast.min())
+    ymax = max(ymax, forecast.max())
+
+pad = (ymax - ymin) * 0.05
+ymin -= pad
+ymax += pad
+
+# ---------------------------
+# Market Tab
+# ---------------------------
 
 with tabs[0]:
+
     fig = go.Figure()
 
-    fig.add_candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"]
+    if chart_type == "Candles":
+        fig.add_candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name="Price"
+        )
+    else:
+        fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Close"))
+
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], name="MA50"))
+
+    if show_forecast:
+        fig.add_trace(go.Scatter(
+            x=future_dates,
+            y=forecast,
+            name="Forecast",
+            line=dict(dash="dash")
+        ))
+
+    fig.update_layout(
+        height=600,
+        yaxis=dict(range=[ymin, ymax]),
+        xaxis_rangeslider_visible=False,
+        template="plotly_dark"
     )
 
-    buys = df[df["Signal"] == 1]
-
-    fig.add_scatter(
-        x=buys.index,
-        y=buys["Close"],
-        mode="markers",
-        marker=dict(color="lime", size=6),
-        name="AI Entry"
-    )
-
-    fig.update_layout(template="plotly_dark", height=600)
     st.plotly_chart(fig, use_container_width=True)
 
-# ===== BACKTEST ===== #
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Price", f"${df['Close'].iloc[-1]:.2f}")
+    col2.metric("RSI", f"{df['RSI'].iloc[-1]:.1f}")
+    col3.metric("MACD", f"{df['MACD'].iloc[-1]:.2f}")
+    col4.metric("Signal", f"{df['Signal'].iloc[-1]:.2f}")
+
+    if show_rsi:
+        st.subheader("RSI")
+        st.line_chart(df["RSI"])
+
+    if show_macd:
+        st.subheader("MACD")
+        st.line_chart(df[["MACD","Signal"]])
+
+# ---------------------------
+# PAPER TRADING SIMULATOR
+# ---------------------------
+
+if "balance" not in st.session_state:
+    st.session_state.balance = 10000
+    st.session_state.shares = 0
+    st.session_state.trades = []
 
 with tabs[1]:
-    st.subheader("Equity Curve")
-    st.line_chart(df["Equity"])
 
-# ===== ANALYTICS ===== #
+    st.subheader("💰 Trading Simulator")
 
-with tabs[2]:
-    for k, v in stats.items():
-        st.metric(k, f"{v:.2f}")
+    price = df["Close"].iloc[-1]
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Balance", f"${st.session_state.balance:.2f}")
+    col2.metric("Shares", st.session_state.shares)
+    col3.metric("Current Price", f"${price:.2f}")
+
+    qty = st.number_input("Shares", 1, 1000, 1)
+
+    buy = st.button("📈 Buy")
+    sell = st.button("📉 Sell")
+
+    if buy and st.session_state.balance >= price * qty:
+        st.session_state.balance -= price * qty
+        st.session_state.shares += qty
+        st.session_state.trades.append(("BUY", price, qty))
+
+    if sell and st.session_state.shares >= qty:
+        st.session_state.balance += price * qty
+        st.session_state.shares -= qty
+        st.session_state.trades.append(("SELL", price, qty))
+
+    pnl = st.session_state.balance + st.session_state.shares * price - 10000
+
+    st.metric("Profit / Loss", f"${pnl:.2f}")
+
+    if st.session_state.trades:
+        st.subheader("Trade Log")
+        st.table(pd.DataFrame(
+            st.session_state.trades,
+            columns=["Type","Price","Shares"]
+        ))
+
