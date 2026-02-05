@@ -3,17 +3,14 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.optimizers import Adam
 
 st.set_page_config(layout="wide")
-
-# ================= STATE ================= #
-
-if "trades" not in st.session_state:
-    st.session_state.trades = []
-
-if "cash" not in st.session_state:
-    st.session_state.cash = 10000.0
 
 # ================= DATA ================= #
 
@@ -26,81 +23,99 @@ def load_data(ticker, period):
 
     return df.dropna()
 
-# ================= INDICATORS ================= #
+# ================= FEATURES ================= #
 
-def indicators(df):
-    close = df["Close"]
+def features(df):
+    df = df.copy()
 
-    df["MA20"] = close.rolling(20).mean()
-    df["MA50"] = close.rolling(50).mean()
+    df["Return"] = df["Close"].pct_change()
+    df["MA10"] = df["Close"].rolling(10).mean()
+    df["MA30"] = df["Close"].rolling(30).mean()
+    df["Vol"] = df["Return"].rolling(10).std()
 
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
+    df["Target"] = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
 
-    rs = gain / loss
-    df["RSI"] = 100 - 100/(1+rs)
+    return df.dropna()
 
-    ema12 = close.ewm(span=12).mean()
-    ema26 = close.ewm(span=26).mean()
+# ================= AI TREND MODEL ================= #
 
-    df["MACD"] = ema12 - ema26
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
+def train_ai(df):
+    X = df[["Return","MA10","MA30","Vol"]]
+    y = df["Target"]
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False)
+
+    model = RandomForestClassifier(n_estimators=300)
+    model.fit(X_train, y_train)
+
+    prob = model.predict_proba(X)[:,1]
+
+    df["TrendProb"] = prob
+    df["Signal"] = np.where(prob > 0.55, 1, 0)
 
     return df
 
-# ================= FORECAST ================= #
+# ================= LSTM FORECAST ================= #
 
-def forecast(df, days=30):
-    if len(df) < 30:
+def lstm_forecast(df, steps=30):
+    prices = df["Close"].values.reshape(-1,1)
+
+    if len(prices) < 60:
         return None, None
 
-    y = df["Close"].values
-    X = np.arange(len(y)).reshape(-1,1)
+    scaler = StandardScaler()
+    prices_scaled = scaler.fit_transform(prices)
 
-    model = LinearRegression().fit(X, y)
+    X, y = [], []
+    for i in range(50, len(prices_scaled)):
+        X.append(prices_scaled[i-50:i])
+        y.append(prices_scaled[i])
 
-    future_X = np.arange(len(y), len(y)+days).reshape(-1,1)
-    preds = model.predict(future_X)
+    X, y = np.array(X), np.array(y)
 
-    dates = pd.date_range(df.index[-1], periods=days+1)[1:]
-    return dates, preds
+    model = Sequential([
+        LSTM(64, return_sequences=True, input_shape=(50,1)),
+        LSTM(32),
+        Dense(1)
+    ])
+
+    model.compile(optimizer=Adam(0.01), loss="mse")
+    model.fit(X, y, epochs=5, verbose=0)
+
+    last = X[-1]
+    preds = []
+
+    for _ in range(steps):
+        p = model.predict(last.reshape(1,50,1), verbose=0)[0]
+        preds.append(p)
+        last = np.vstack([last[1:], p])
+
+    preds = scaler.inverse_transform(np.array(preds))
+
+    dates = pd.date_range(df.index[-1], periods=steps+1)[1:]
+
+    return dates, preds.flatten()
 
 # ================= BACKTEST ================= #
 
 def backtest(df):
-    df = df.copy()
-    df["Position"] = np.where(df["MA20"] > df["MA50"], 1, 0)
-    df["Return"] = df["Close"].pct_change()
-    df["Strategy"] = df["Return"] * df["Position"].shift()
-
-    df["Equity"] = (1 + df["Strategy"]).cumprod()
-
-    trades = []
-    entry = None
-
-    for i in range(1, len(df)):
-        if df["Position"].iloc[i] == 1 and df["Position"].iloc[i-1] == 0:
-            entry = df["Close"].iloc[i]
-        if df["Position"].iloc[i] == 0 and df["Position"].iloc[i-1] == 1 and entry:
-            exit_price = df["Close"].iloc[i]
-            trades.append(exit_price - entry)
-            entry = None
-
-    wins = sum(1 for t in trades if t > 0)
-    losses = len(trades) - wins
-
-    win_rate = wins / len(trades) * 100 if trades else 0
-    total_return = (df["Equity"].iloc[-1]-1)*100
+    df["StrategyReturn"] = df["Return"] * df["Signal"].shift()
+    df["Equity"] = (1 + df["StrategyReturn"]).cumprod()
 
     peak = df["Equity"].cummax()
-    drawdown = ((df["Equity"] - peak) / peak).min() * 100
+    drawdown = ((df["Equity"] - peak) / peak).min()
 
-    return df, win_rate, total_return, drawdown, trades
+    win_rate = (df["StrategyReturn"] > 0).mean() * 100
+    total_return = (df["Equity"].iloc[-1] - 1) * 100
+
+    return df, win_rate, total_return, drawdown*100
 
 # ================= CHART ================= #
 
-def draw_chart(df, ticker, candles, show_forecast):
+def chart(df, ticker, candles, show_lstm):
 
     fig = go.Figure()
 
@@ -115,17 +130,24 @@ def draw_chart(df, ticker, candles, show_forecast):
     else:
         fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Price"))
 
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], name="MA50"))
+    buys = df[df["Signal"]==1]
 
-    if show_forecast:
-        fd, fp = forecast(df)
+    fig.add_trace(go.Scatter(
+        x=buys.index,
+        y=buys["Close"],
+        mode="markers",
+        marker=dict(color="lime", size=6),
+        name="AI Buy Signal"
+    ))
+
+    if show_lstm:
+        fd, fp = lstm_forecast(df)
         if fd is not None:
             fig.add_trace(go.Scatter(
                 x=fd,
                 y=fp,
                 line=dict(dash="dot"),
-                name="Forecast"
+                name="AI Forecast"
             ))
 
     fig.update_layout(
@@ -137,93 +159,47 @@ def draw_chart(df, ticker, candles, show_forecast):
 
     st.plotly_chart(fig, use_container_width=True)
 
-# ================= SIDEBAR ================= #
+# ================= UI ================= #
 
-st.sidebar.title("⚙ Controls")
+st.sidebar.title("🧠 AI Trading System")
 
-ticker = st.sidebar.text_input("Ticker", "AAPL").upper()
-period = st.sidebar.selectbox("Range", ["3mo","6mo","1y","3y","5y"])
+ticker = st.sidebar.text_input("Ticker", "AAPL")
+period = st.sidebar.selectbox("Range", ["6mo","1y","3y","5y"])
 candles = st.sidebar.checkbox("Candlesticks", True)
-show_forecast = st.sidebar.checkbox("AI Forecast", True)
+show_lstm = st.sidebar.checkbox("Show LSTM Forecast", True)
 
 df = load_data(ticker, period)
 
-if df.empty:
-    st.stop()
+df = features(df)
+df = train_ai(df)
 
-df = indicators(df)
-
-price = float(df["Close"].iloc[-1])
-
-# ================= TABS ================= #
-
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Chart & Indicators",
-    "📈 Paper Trading",
-    "💼 Portfolio",
-    "🧪 Backtesting & Analytics"
+tabs = st.tabs([
+    "📊 AI Chart",
+    "📈 Backtest Analytics",
+    "🧠 Trend Probabilities"
 ])
 
-# ---------- CHART ---------- #
+# ====== CHART ====== #
 
-with tab1:
-    draw_chart(df, ticker, candles, show_forecast)
+with tabs[0]:
+    chart(df, ticker, candles, show_lstm)
 
-    st.subheader("RSI")
-    st.line_chart(df["RSI"])
+# ====== BACKTEST ====== #
 
-    st.subheader("MACD")
-    st.line_chart(df[["MACD","Signal"]])
+with tabs[1]:
+    bt, win, ret, dd = backtest(df)
 
-# ---------- SIM ---------- #
-
-with tab2:
-    qty = st.number_input("Shares", 1, 1000, 1)
-
-    c1, c2 = st.columns(2)
-
-    if c1.button("BUY"):
-        cost = price * qty
-        if st.session_state.cash >= cost:
-            st.session_state.cash -= cost
-            st.session_state.trades.append(("BUY", price, qty))
-
-    if c2.button("SELL"):
-        st.session_state.cash += price * qty
-        st.session_state.trades.append(("SELL", price, qty))
-
-    if st.session_state.trades:
-        st.dataframe(pd.DataFrame(st.session_state.trades, columns=["Type","Price","Qty"]))
-
-# ---------- PORTFOLIO ---------- #
-
-with tab3:
-    profit = 0
-    for t in st.session_state.trades:
-        if t[0] == "BUY":
-            profit += (price - t[1]) * t[2]
-        else:
-            profit += (t[1] - price) * t[2]
-
-    st.metric("Cash", f"${st.session_state.cash:,.2f}")
-    st.metric("Profit/Loss", f"${profit:,.2f}")
-
-# ---------- BACKTEST ---------- #
-
-with tab4:
-    bt, win_rate, total_return, drawdown, trades = backtest(df)
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Win Rate", f"{win_rate:.1f}%")
-    col2.metric("Total Return", f"{total_return:.1f}%")
-    col3.metric("Max Drawdown", f"{drawdown:.1f}%")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Win Rate", f"{win:.1f}%")
+    c2.metric("Total Return", f"{ret:.1f}%")
+    c3.metric("Max Drawdown", f"{dd:.1f}%")
 
     st.subheader("Equity Curve")
     st.line_chart(bt["Equity"])
 
-    st.subheader("Trade Results")
-    if trades:
-        st.bar_chart(pd.Series(trades))
-    else:
-        st.info("Not enough signals yet")
+# ====== PROB ====== #
+
+with tabs[2]:
+    st.subheader("AI Trend Probability (0–1)")
+
+    st.line_chart(df["TrendProb"])
