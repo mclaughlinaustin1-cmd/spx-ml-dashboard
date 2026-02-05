@@ -14,27 +14,30 @@ if "trades" not in st.session_state:
     st.session_state.trades = []
 
 if "cash" not in st.session_state:
-    st.session_state.cash = 10000
+    st.session_state.cash = 10000.0
 
 # ---------------- DATA ---------------- #
 
 @st.cache_data
 def load_data(ticker, period):
-    df = yf.download(ticker, period=period, interval="1d")
-    df.dropna(inplace=True)
+    df = yf.download(ticker, period=period, interval="1d", progress=False)
+    df = df.dropna()
     return df
 
 # ---------------- INDICATORS ---------------- #
 
-def indicators(df):
+def add_indicators(df):
     delta = df["Close"].diff()
+
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
+
     rs = gain / loss
-    df["RSI"] = 100 - 100/(1+rs)
+    df["RSI"] = 100 - 100 / (1 + rs)
 
     ema12 = df["Close"].ewm(span=12).mean()
     ema26 = df["Close"].ewm(span=26).mean()
+
     df["MACD"] = ema12 - ema26
     df["Signal"] = df["MACD"].ewm(span=9).mean()
 
@@ -42,16 +45,23 @@ def indicators(df):
 
 # ---------------- FORECAST ---------------- #
 
-def forecast(df, days):
-    X = np.arange(len(df)).reshape(-1,1)
-    y = df["Close"].values
-    model = LinearRegression().fit(X,y)
-    future = np.arange(len(df), len(df)+days).reshape(-1,1)
-    preds = model.predict(future)
-    future_dates = pd.date_range(df.index[-1], periods=days+1)[1:]
-    return future_dates, preds
+def linear_forecast(df, days=30):
+    if len(df) < 20:
+        return None, None
 
-# ---------------- PLOT ---------------- #
+    X = np.arange(len(df)).reshape(-1,1)
+    y = df["Close"].values.astype(float)
+
+    model = LinearRegression().fit(X, y)
+
+    future_X = np.arange(len(df), len(df)+days).reshape(-1,1)
+    preds = model.predict(future_X)
+
+    future_dates = pd.date_range(df.index[-1], periods=days+1)[1:]
+
+    return future_dates, preds.astype(float)
+
+# ---------------- CHART ---------------- #
 
 def plot_chart(df, ticker, chart_type, show_rsi, show_macd, show_forecast):
 
@@ -67,98 +77,132 @@ def plot_chart(df, ticker, chart_type, show_rsi, show_macd, show_forecast):
             name="Price"
         )
     else:
-        fig.add_trace(go.Scatter(x=df.index,y=df["Close"],name="Price"))
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df["Close"],
+            name="Price",
+            line=dict(width=2)
+        ))
 
-    ymin = df["Low"].min() - 1
-    ymax = df["High"].max() + 1
+    ymin = float(df["Low"].min())
+    ymax = float(df["High"].max())
 
-    # Trades overlay
-    for t in st.session_state.trades:
-        if t["ticker"] == ticker:
-            color = "green" if t["type"]=="BUY" else "red"
+    # ---------------- Trades overlay ---------------- #
+
+    for trade in st.session_state.trades:
+        if trade["ticker"] == ticker:
+            color = "green" if trade["type"] == "BUY" else "red"
+
             fig.add_trace(go.Scatter(
-                x=[t["date"]],
-                y=[t["price"]],
+                x=[trade["date"]],
+                y=[trade["price"]],
                 mode="markers",
-                marker=dict(size=12,color=color),
-                name=t["type"]
+                marker=dict(size=12, color=color),
+                name=trade["type"]
             ))
-            ymin = min(ymin, t["price"]-1)
-            ymax = max(ymax, t["price"]+1)
+
+            ymin = min(ymin, trade["price"])
+            ymax = max(ymax, trade["price"])
+
+    # ---------------- Forecast ---------------- #
 
     if show_forecast:
-        fd, fp = forecast(df, 30)
-        fig.add_trace(go.Scatter(x=fd,y=fp,name="Forecast",line=dict(dash="dot")))
-        ymin = min(ymin, min(fp)-1)
-        ymax = max(ymax, max(fp)+1)
+        f_dates, f_prices = linear_forecast(df)
+
+        if f_dates is not None:
+            fig.add_trace(go.Scatter(
+                x=f_dates,
+                y=f_prices,
+                name="Forecast",
+                line=dict(dash="dot", width=2)
+            ))
+
+            ymin = min(ymin, float(np.min(f_prices)))
+            ymax = max(ymax, float(np.max(f_prices)))
+
+    # padding so signals never touch edges
+    padding = (ymax - ymin) * 0.05
+    ymin -= padding
+    ymax += padding
 
     fig.update_layout(
         height=550,
-        xaxis_rangeslider_visible=False,
-        yaxis=dict(range=[ymin,ymax]),
         template="plotly_dark",
-        title=ticker
+        title=ticker,
+        yaxis=dict(range=[ymin, ymax]),
+        xaxis_rangeslider_visible=False
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
     if show_rsi:
+        st.subheader("RSI")
         st.line_chart(df["RSI"])
 
     if show_macd:
-        st.line_chart(df[["MACD","Signal"]])
+        st.subheader("MACD")
+        st.line_chart(df[["MACD", "Signal"]])
 
 # ---------------- SIDEBAR ---------------- #
 
-st.sidebar.title("Trading Panel")
+st.sidebar.title("📊 Trading Controls")
 
 ticker = st.sidebar.text_input("Ticker", "AAPL")
 
 period = st.sidebar.selectbox(
     "Time Range",
-    ["1mo","3mo","6mo","1y","3y","5y"]
+    ["1mo", "3mo", "6mo", "1y", "3y", "5y"]
 )
 
-chart_type = st.sidebar.radio("Chart",["Line","Candles"])
+chart_type = st.sidebar.radio("Chart Type", ["Line", "Candles"])
 
-show_rsi = st.sidebar.checkbox("RSI",True)
-show_macd = st.sidebar.checkbox("MACD",True)
-show_forecast = st.sidebar.checkbox("Forecast",True)
+show_rsi = st.sidebar.checkbox("Show RSI", True)
+show_macd = st.sidebar.checkbox("Show MACD", True)
+show_forecast = st.sidebar.checkbox("Show Forecast", True)
 
-qty = st.sidebar.number_input("Shares",1,1000,1)
-
-# ---------------- TRADE EXECUTION ---------------- #
-
-if st.sidebar.button("📈 BUY"):
-    price = float(st.session_state.last_price)
-    cost = price * qty
-    if st.session_state.cash >= cost:
-        st.session_state.cash -= cost
-        st.session_state.trades.append({
-            "ticker":ticker,
-            "type":"BUY",
-            "price":price,
-            "qty":qty,
-            "date":datetime.now()
-        })
-
-if st.sidebar.button("📉 SELL"):
-    price = float(st.session_state.last_price)
-    st.session_state.cash += price * qty
-    st.session_state.trades.append({
-        "ticker":ticker,
-        "type":"SELL",
-        "price":price,
-        "qty":qty,
-        "date":datetime.now()
-    })
+qty = st.sidebar.number_input("Shares", min_value=1, value=1)
 
 # ---------------- MAIN ---------------- #
 
 df = load_data(ticker, period)
-df = indicators(df)
 
-st.session_state.last_price = df["Close"].iloc[-1]
+if df.empty:
+    st.warning("No data found")
+    st.stop()
+
+df = add_indicators(df)
+
+current_price = float(df["Close"].iloc[-1])
+
+st.metric("Current Price", f"${current_price:,.2f}")
+
+# ---------------- TRADING ---------------- #
+
+col1, col2 = st.sidebar.columns(2)
+
+if col1.button("📈 BUY"):
+    cost = current_price * qty
+    if st.session_state.cash >= cost:
+        st.session_state.cash -= cost
+        st.session_state.trades.append({
+            "ticker": ticker,
+            "type": "BUY",
+            "price": current_price,
+            "qty": qty,
+            "date": datetime.now()
+        })
+
+if col2.button("📉 SELL"):
+    st.session_state.cash += current_price * qty
+    st.session_state.trades.append({
+        "ticker": ticker,
+        "type": "SELL",
+        "price": current_price,
+        "qty": qty,
+        "date": datetime.now()
+    })
+
+# ---------------- CHART ---------------- #
 
 plot_chart(
     df,
@@ -171,18 +215,19 @@ plot_chart(
 
 # ---------------- PORTFOLIO ---------------- #
 
-st.subheader("📊 Portfolio")
+st.subheader("💼 Portfolio")
 
-pl = 0
-for t in st.session_state.trades:
-    if t["ticker"] == ticker:
-        direction = 1 if t["type"]=="BUY" else -1
-        pl += direction * (df["Close"].iloc[-1]-t["price"]) * t["qty"]
+profit = 0.0
 
-st.metric("Cash", f"${st.session_state.cash:,.2f}")
-st.metric("Profit / Loss", f"${pl:,.2f}")
+for trade in st.session_state.trades:
+    if trade["ticker"] == ticker:
+        if trade["type"] == "BUY":
+            profit += (current_price - trade["price"]) * trade["qty"]
+        else:
+            profit += (trade["price"] - current_price) * trade["qty"]
+
+st.metric("Cash Balance", f"${st.session_state.cash:,.2f}")
+st.metric("Profit / Loss", f"${profit:,.2f}")
 
 if st.session_state.trades:
     st.dataframe(pd.DataFrame(st.session_state.trades))
-
-
