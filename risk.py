@@ -8,3 +8,4 @@ def position_size(df, capital=100000, risk_per_trade=0.01):
     df["Size"] = size.clip(0, 1)
 
     return df
+
