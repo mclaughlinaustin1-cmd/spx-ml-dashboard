@@ -18,32 +18,36 @@ st.title("📈 AI Stock Price Predictor")
 def fetch_data(ticker, days):
     end = datetime.today()
     start = end - timedelta(days=days)
-    return yf.download(ticker, start=start, end=end)
+    df = yf.download(ticker, start=start, end=end)
+    return df[["Close"]].dropna()
 
 # ---------------- FEATURES ----------------
 
-def add_features(df):
-    df = df.copy()
+def make_features(df):
+    price = df["Close"].values
 
-    price = "Close"
+    ma20 = pd.Series(price).rolling(20).mean().values
+    ma50 = pd.Series(price).rolling(50).mean().values
+    returns = pd.Series(price).pct_change().values
 
-    df["MA20"] = df[price].rolling(20).mean()
-    df["MA50"] = df[price].rolling(50).mean()
-    df["Returns"] = df[price].pct_change()
-    df["Ordinal"] = df.index.astype("int64") // 10**9  # numeric timestamp
+    X = np.column_stack([
+        np.arange(len(price)),
+        ma20,
+        ma50,
+        returns
+    ])
 
-    df = df.dropna().astype(float)
-    return df
+    mask = ~np.isnan(X).any(axis=1)
+    X = X[mask]
+    y = price[mask]
+
+    return X, y, df.index[mask]
 
 # ---------------- MODEL ----------------
 
 def train_models(X, y):
     lr = LinearRegression()
-    rf = RandomForestRegressor(
-        n_estimators=300,
-        max_depth=8,
-        random_state=42
-    )
+    rf = RandomForestRegressor(n_estimators=300, random_state=42)
 
     lr.fit(X, y)
     rf.fit(X, y)
@@ -52,52 +56,30 @@ def train_models(X, y):
 
 # ---------------- PLOT ----------------
 
-def plot_chart(df, preds, future_ts):
+def plot_chart(dates, prices, preds, future_date):
     fig = go.Figure()
 
-    fig.add_trace(go.Scatter(
-        x=pd.to_datetime(df.index, unit="s"),
-        y=df["Close"],
-        name="Price"
-    ))
+    fig.add_trace(go.Scatter(x=dates, y=prices, name="Price"))
 
     fig.add_trace(go.Scatter(
-        x=pd.to_datetime(df.index, unit="s"),
-        y=df["MA20"],
-        name="MA20"
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=pd.to_datetime(df.index, unit="s"),
-        y=df["MA50"],
-        name="MA50"
-    ))
-
-    future_dt = pd.to_datetime(future_ts, unit="s")
-
-    fig.add_trace(go.Scatter(
-        x=[future_dt],
+        x=[future_date],
         y=[preds["lr"]],
         mode="markers+text",
-        name="Linear Prediction",
-        text=[f"${preds['lr']:.2f}"],
-        marker=dict(size=12)
+        name="LR Prediction",
+        text=[f"${preds['lr']:.2f}"]
     ))
 
     fig.add_trace(go.Scatter(
-        x=[future_dt],
+        x=[future_date],
         y=[preds["rf"]],
         mode="markers+text",
-        name="Random Forest Prediction",
-        text=[f"${preds['rf']:.2f}"],
-        marker=dict(size=12)
+        name="RF Prediction",
+        text=[f"${preds['rf']:.2f}"]
     ))
 
     fig.update_layout(
-        title="Historical Price & AI Predictions",
-        hovermode="x unified",
-        xaxis_title="Date",
-        yaxis_title="Price"
+        title="Stock Price & AI Forecast",
+        hovermode="x unified"
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -105,76 +87,53 @@ def plot_chart(df, preds, future_ts):
 # ---------------- UI ----------------
 
 with st.sidebar:
-    st.header("⚙ Controls")
-
     ticker = st.text_input("Stock ticker", "AAPL").upper()
-
-    days = st.selectbox(
-        "Historical range (days)",
-        [180, 365, 730, 1825],
-        index=1
-    )
-
-    future_date = st.date_input(
-        "Prediction date",
-        datetime.today() + timedelta(days=7)
-    )
-
-    run = st.button("Run AI Forecast")
+    days = st.selectbox("History range", [180, 365, 730, 1825], index=1)
+    future_date = st.date_input("Prediction date", datetime.today()+timedelta(days=7))
+    run = st.button("Run Forecast")
 
 # ---------------- APP ----------------
 
 if run:
-    with st.spinner("Downloading stock data..."):
-        raw = fetch_data(ticker, days)
-
-    if raw.empty:
-        st.error("No stock data found.")
-        st.stop()
+    raw = fetch_data(ticker, days)
 
     if len(raw) < 80:
-        st.warning("Not enough historical data.")
+        st.error("Not enough data.")
         st.stop()
 
-    data = add_features(raw)
+    X, y, dates = make_features(raw)
 
-    FEATURES = ["Ordinal", "MA20", "MA50", "Returns"]
-
-    X = data[FEATURES].values.astype(float)
-    y = data["Close"].values.astype(float)
-
-    split = int(len(X) * 0.8)
-
+    split = int(len(X)*0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
 
     lr, rf = train_models(X_train, y_train)
 
-    future_ts = int(pd.Timestamp(future_date).timestamp())
+    future_index = len(raw)
 
-    last_row = data.iloc[-1][FEATURES].values.astype(float)
-    last_row[0] = future_ts
+    last_ma20 = np.mean(raw["Close"].values[-20:])
+    last_ma50 = np.mean(raw["Close"].values[-50:])
+    last_return = (raw["Close"].values[-1] - raw["Close"].values[-2]) / raw["Close"].values[-2]
 
-    future_features = last_row.reshape(1, -1)
+    future_features = np.array([
+        future_index,
+        last_ma20,
+        last_ma50,
+        last_return
+    ]).reshape(1, -1)
 
-    pred_lr = float(lr.predict(future_features)[0])
-    pred_rf = float(rf.predict(future_features)[0])
-
-    if np.isnan(pred_lr) or np.isnan(pred_rf):
-        st.error("Prediction failed.")
-        st.stop()
+    pred_lr = lr.predict(future_features).item()
+    pred_rf = rf.predict(future_features).item()
 
     col1, col2, col3 = st.columns(3)
-
-    col1.metric("📉 Linear Regression", f"${pred_lr:.2f}")
-    col2.metric("🌲 Random Forest", f"${pred_rf:.2f}")
-    col3.metric("📊 Avg Forecast", f"${(pred_lr + pred_rf)/2:.2f}")
+    col1.metric("Linear Regression", f"${pred_lr:.2f}")
+    col2.metric("Random Forest", f"${pred_rf:.2f}")
+    col3.metric("Average", f"${(pred_lr + pred_rf)/2:.2f}")
 
     st.subheader("Model Accuracy")
+    st.write("LR R²:", round(r2_score(y_test, lr.predict(X_test)), 4))
+    st.write("RF R²:", round(r2_score(y_test, rf.predict(X_test)), 4))
 
-    st.write("Linear Regression R²:", round(r2_score(y_test, lr.predict(X_test)), 4))
-    st.write("Random Forest R²:", round(r2_score(y_test, rf.predict(X_test)), 4))
-
-    plot_chart(data, {"lr": pred_lr, "rf": pred_rf}, future_ts)
+    plot_chart(dates, raw["Close"].values[-len(dates):], {"lr": pred_lr, "rf": pred_rf}, future_date)
 
     st.success("Forecast complete!")
