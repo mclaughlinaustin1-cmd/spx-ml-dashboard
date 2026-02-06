@@ -9,7 +9,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime, timedelta
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal v5.8", page_icon="🏛️")
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal v5.9", page_icon="🏛️")
 
 # --- Global Sidebar ---
 with st.sidebar:
@@ -17,12 +17,13 @@ with st.sidebar:
     ticker = st.text_input("Ticker Symbol", "NVDA").upper()
     target_dt = st.date_input("Forecast Target Date", datetime.now() + timedelta(days=7))
     st.divider()
-    st.caption("v5.8: Independent Chart Layout & Robust Audit Logic")
+    st.caption("v5.9: 10-Year Historical Audit Support")
 
 # --- Core Processing Logic ---
 @st.cache_data(ttl=3600)
 def get_terminal_data(ticker):
-    df = yf.download(ticker, period="5y", interval="1d")
+    # Expanded to 10 years to support deeper audits
+    df = yf.download(ticker, period="10y", interval="1d")
     if df.empty: return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -47,7 +48,7 @@ def get_terminal_data(ticker):
     scaler = StandardScaler().fit(X)
     X_s = scaler.transform(X)
     
-    # Cross-Validation
+    # Cross-Validation for Live Terminal Win Rate
     tscv = TimeSeriesSplit(n_splits=5)
     wr_scores = []
     for tr_i, te_i in tscv.split(X_s):
@@ -57,7 +58,8 @@ def get_terminal_data(ticker):
         w = (np.sign(p) == np.sign(y[te_i])) & (np.abs(y[te_i]) >= 0.005)
         wr_scores.append(w.mean())
     
-    return df, RandomForestRegressor(n_estimators=100, max_depth=5).fit(X_s, y), np.mean(wr_scores) * 100, scaler
+    final_model = RandomForestRegressor(n_estimators=100, max_depth=5).fit(X_s, y)
+    return df, final_model, np.mean(wr_scores) * 100, scaler
 
 data_package = get_terminal_data(ticker)
 
@@ -67,14 +69,12 @@ if data_package:
 
     # --- TAB 1: LIVE TERMINAL ---
     with tab_live:
-        # Prediction
         last_s = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
         p_ret = model.predict(last_s)[0]
         days_out = (pd.Timestamp(target_dt) - df.index[-1]).days
         final_p = df['Close'].iloc[-1] * np.exp(p_ret * max(1, days_out))
         proj_m = ((final_p / df['Close'].iloc[-1]) - 1) * 100
         
-        # Decision Logic
         signals = {"BUY": 0, "SELL": 0, "HOLD": 0}; reasons = []
         if df['RSI'].iloc[-1] < 35: signals["BUY"] += 1; reasons.append("RSI: Oversold")
         elif df['RSI'].iloc[-1] > 65: signals["SELL"] += 1; reasons.append("RSI: Overbought")
@@ -90,50 +90,43 @@ if data_package:
         
         c1, c2 = st.columns([3, 1])
         with c1:
-            # CHART 1: PRICE (Independent)
             fig_p = go.Figure()
             fig_p.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"))
             fig_p.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='rgba(255,255,255,0.2)'), name="BB Up"))
             fig_p.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='rgba(255,255,255,0.2)'), fill='tonexty', fillcolor='rgba(0,255,204,0.05)', name="BB Low"))
-            
-            fig_p.update_layout(
-                title="Price Action & Volatility Bands", template="plotly_dark", height=500,
-                xaxis_rangeslider_visible=True,
-                xaxis_range=[df.index[-60], df.index[-1]], # Start zoomed
-                yaxis=dict(fixedrange=False), margin=dict(t=30, b=0)
-            )
+            fig_p.update_layout(title="Price Action", template="plotly_dark", height=450, xaxis_range=[df.index[-60], df.index[-1]], yaxis=dict(fixedrange=False), margin=dict(t=30, b=0))
             fig_p.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig_p, use_container_width=True)
 
-            # CHART 2: RSI (Independent)
             fig_rsi = go.Figure()
             fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='orange', width=2)))
-            fig_rsi.add_hline(y=70, line_dash="dot", line_color="red")
-            fig_rsi.add_hline(y=30, line_dash="dot", line_color="green")
-            fig_rsi.update_layout(
-                title="Relative Strength Index (RSI)", template="plotly_dark", height=250,
-                xaxis_range=[df.index[-60], df.index[-1]], # Keep sync with price zoom
-                margin=dict(t=30, b=30)
-            )
+            fig_rsi.add_hline(y=70, line_dash="dot", line_color="red"); fig_rsi.add_hline(y=30, line_dash="dot", line_color="green")
+            fig_rsi.update_layout(title="RSI", template="plotly_dark", height=200, xaxis_range=[df.index[-60], df.index[-1]], margin=dict(t=30, b=30))
             fig_rsi.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig_rsi, use_container_width=True)
 
         with c2:
             st.metric("Model Confidence", f"{win_rate:.1f}%")
             st.metric("Target Price", f"${final_p:,.2f}")
-            st.info("Charts are independent. Zooming in the Price chart will not squash the RSI.")
 
-    # --- TAB 2: HISTORICAL AUDIT (FIXED LOGIC) ---
+    # --- TAB 2: HISTORICAL AUDIT (10-YEAR READY) ---
     with tab_audit:
-        st.subheader("🕵️ Performance Stress Test")
+        st.subheader("🕵️ 10-Year Performance Audit")
         min_d, max_d = df.index.min().date(), df.index.max().date()
         
         ca, cb = st.columns(2)
-        audit_start = ca.date_input("Audit Start", value=max_d - timedelta(days=180), min_value=min_d + timedelta(days=100), max_value=max_d - timedelta(days=10))
-        audit_end = cb.date_input("Audit End", value=max_d, min_value=audit_start + timedelta(days=5), max_value=max_d)
+        # Allows selection from 10 years ago up to now
+        audit_start = ca.date_input("Audit Start Date", value=max_d - timedelta(days=365), 
+                                    min_value=min_d + timedelta(days=150), # Buffer for initial training
+                                    max_value=max_d - timedelta(days=20))
+        
+        audit_end = cb.date_input("Audit End Date", value=max_d, 
+                                  min_value=audit_start + timedelta(days=5), 
+                                  max_value=max_d)
         
         if st.button("🚀 Run Backtest"):
             t_start, t_end = pd.Timestamp(audit_start), pd.Timestamp(audit_end)
+            # HONEST AUDIT: Model only knows data strictly BEFORE the start date
             train_box = df[df.index < t_start]
             test_box = df[(df.index >= t_start) & (df.index <= t_end)]
             
@@ -145,15 +138,22 @@ if data_package:
                 
                 a_preds = m_audit.predict(scaler_a.transform(test_box[features]))
                 test_box = test_box.copy()
+                # Strategy: If AI predicts positive, go long. If negative, stay in cash (or go short)
                 test_box['Strategy_Ret'] = np.sign(a_preds) * test_box['Log_Ret']
                 test_box['Equity'] = (1 + test_box['Strategy_Ret']).cumprod() * 10000
                 test_box['Market'] = (1 + test_box['Log_Ret']).cumprod() * 10000
                 
-                st.metric("Audit Accuracy", f"{(np.sign(a_preds) == np.sign(test_box['Log_Ret'])).mean()*100:.1f}%")
+                # Metrics
+                acc = (np.sign(a_preds) == np.sign(test_box['Log_Ret'])).mean() * 100
+                st.metric("Audit Accuracy Score", f"{acc:.1f}%")
+                
                 fig_audit = go.Figure()
                 fig_audit.add_trace(go.Scatter(x=test_box.index, y=test_box['Equity'], name="AI Strategy", line=dict(color="#00ffcc", width=3)))
                 fig_audit.add_trace(go.Scatter(x=test_box.index, y=test_box['Market'], name="Buy & Hold", line=dict(color="gray", dash='dash')))
-                fig_audit.update_layout(title="Growth of $10,000", template="plotly_dark", height=450)
+                fig_audit.update_layout(title=f"Backtest Growth: {audit_start} to {audit_end}", template="plotly_dark", height=450)
                 st.plotly_chart(fig_audit, use_container_width=True)
+            else:
+                st.error("Insufficient training data available before the chosen Start Date.")
 else:
-    st.error("Invalid Ticker.")
+    st.error("Invalid Ticker or No Data Found.")
+
