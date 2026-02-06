@@ -8,32 +8,23 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime, timedelta
 
-# --- VADER Import Fallback ---
+# --- Robust VADER Import ---
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
     VADER_AVAILABLE = True
 except ImportError:
     VADER_AVAILABLE = False
 
-# --- Core Logic Functions ---
-def get_sentiment_score(ticker):
-    if not VADER_AVAILABLE: return 0
-    try:
-        tk = yf.Ticker(ticker)
-        news = tk.news[:5]
-        analyzer = SentimentIntensityAnalyzer()
-        scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
-        return np.mean(scores) if scores else 0
-    except: return 0
-
+# --- Core Model Logic ---
 @st.cache_data(ttl=3600)
 def build_quant_data(ticker):
     df = yf.download(ticker, period="5y", interval="1d")
     if df.empty: return None
+    
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # Technicals
+    # Technical Indicators
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['MA20'] = df['Close'].rolling(20).mean()
     df['STD20'] = df['Close'].rolling(20).std()
@@ -44,11 +35,11 @@ def build_quant_data(ticker):
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-    
     df['Vol_10'] = df['Log_Ret'].rolling(10).std()
+    
     df = df.dropna()
     
-    # ML Training
+    # ML Setup
     X = df[['RSI', 'Vol_10', 'Log_Ret']].values
     y = df['Log_Ret'].values
     scaler = StandardScaler().fit(X)
@@ -64,90 +55,89 @@ def build_quant_data(ticker):
     
     return df, model, win_rate, scaler
 
-# --- Page UI ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal")
-st.title("🏛️ AI Alpha Terminal: Decision Engine")
+# --- Sentiment Engine ---
+def get_sentiment(ticker):
+    if not VADER_AVAILABLE: return 0
+    try:
+        tk = yf.Ticker(ticker)
+        news = tk.news[:5]
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
+        return np.mean(scores) if scores else 0
+    except: return 0
 
-ticker = st.sidebar.text_input("Ticker", "AAPL").upper()
+# --- UI Setup ---
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal")
+st.title("🏛️ AI Alpha Terminal")
+
+ticker = st.sidebar.text_input("Ticker", "NVDA").upper()
 target_dt = st.sidebar.date_input("Target Date", datetime.now() + timedelta(days=7))
 
 data = build_quant_data(ticker)
 
 if data:
     df, model, win_rate, scaler = data
-    sent_score = get_sentiment_score(ticker)
+    sent_score = get_sentiment(ticker)
     
     # --- Prediction ---
     days_out = (pd.Timestamp(target_dt) - df.index[-1]).days
-    last_state = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
-    pred_ret = model.predict(last_state)[0]
+    current_state = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
+    pred_ret = model.predict(current_state)[0]
     final_p = df['Close'].iloc[-1] * np.exp((pred_ret + (sent_score * 0.002)) * days_out)
 
-    # --- DECISION LOGIC ---
+    # --- Decision Matrix Logic ---
     reasons = []
-    buy_signals = 0
-    sell_signals = 0
-
-    # 1. RSI Logic
+    signals = {"BUY": 0, "SELL": 0}
+    
+    # RSI
     rsi_val = df['RSI'].iloc[-1]
-    if rsi_val < 35: 
-        reasons.append({"Factor": "RSI", "Status": "Oversold", "Signal": "BUY", "Color": "#00ffcc"})
-        buy_signals += 1
-    elif rsi_val > 65: 
-        reasons.append({"Factor": "RSI", "Status": "Overbought", "Signal": "SELL", "Color": "#ff4b4b"})
-        sell_signals += 1
-    else:
-        reasons.append({"Factor": "RSI", "Status": "Neutral", "Signal": "HOLD", "Color": "#808080"})
+    sig = "BUY" if rsi_val < 35 else "SELL" if rsi_val > 65 else "HOLD"
+    reasons.append({"Factor": "RSI", "Status": f"Level {rsi_val:.1f}", "Signal": sig})
+    if sig in signals: signals[sig] += 1
 
-    # 2. Bollinger Band Logic
+    # Bollinger
     price = df['Close'].iloc[-1]
-    if price < df['BB_Low'].iloc[-1]:
-        reasons.append({"Factor": "Volatility", "Status": "Below Lower BB", "Signal": "BUY", "Color": "#00ffcc"})
-        buy_signals += 1
-    elif price > df['BB_Up'].iloc[-1]:
-        reasons.append({"Factor": "Volatility", "Status": "Above Upper BB", "Signal": "SELL", "Color": "#ff4b4b"})
-        sell_signals += 1
-    else:
-        reasons.append({"Factor": "Volatility", "Status": "Inside Bands", "Signal": "HOLD", "Color": "#808080"})
-
-    # 3. Sentiment Logic
-    if sent_score > 0.15:
-        reasons.append({"Factor": "Sentiment", "Status": "Bullish News", "Signal": "BUY", "Color": "#00ffcc"})
-        buy_signals += 1
-    elif sent_score < -0.15:
-        reasons.append({"Factor": "Sentiment", "Status": "Bearish News", "Signal": "SELL", "Color": "#ff4b4b"})
-        sell_signals += 1
-    else:
-        reasons.append({"Factor": "Sentiment", "Status": "Neutral", "Signal": "HOLD", "Color": "#808080"})
-
-    # 4. ML Prediction Logic
-    proj_move = ((final_p / price) - 1) * 100
-    if proj_move > 2.0:
-        reasons.append({"Factor": "AI Model", "Status": f"Projected +{proj_move:.1f}%", "Signal": "BUY", "Color": "#00ffcc"})
-        buy_signals += 1
-    elif proj_move < -2.0:
-        reasons.append({"Factor": "AI Model", "Status": f"Projected {proj_move:.1f}%", "Signal": "SELL", "Color": "#ff4b4b"})
-        sell_signals += 1
-    else:
-        reasons.append({"Factor": "AI Model", "Status": "Flat Forecast", "Signal": "HOLD", "Color": "#808080"})
+    sig = "BUY" if price < df['BB_Low'].iloc[-1] else "SELL" if price > df['BB_Up'].iloc[-1] else "HOLD"
+    reasons.append({"Factor": "BBands", "Status": "Price/Band Rel", "Signal": sig})
+    if sig in signals: signals[sig] += 1
 
     # Final Decision Calculation
-    if buy_signals >= 3: final_decision, decision_color = "STRONG BUY", "#00ffcc"
-    elif buy_signals >= 2: final_decision, decision_color = "BUY", "#00ffcc"
-    elif sell_signals >= 3: final_decision, decision_color = "STRONG SELL", "#ff4b4b"
-    elif sell_signals >= 2: final_decision, decision_color = "SELL", "#ff4b4b"
-    else: final_decision, decision_color = "HOLD", "#ff9500"
+    decision = "STRONG BUY" if signals["BUY"] >= 2 else "BUY" if signals["BUY"] == 1 else "SELL" if signals["SELL"] >= 1 else "HOLD"
+    color = "#00ffcc" if "BUY" in decision else "#ff4b4b" if "SELL" in decision else "#ff9500"
 
-    # --- TOP ROW: FINAL DECISION ---
-    st.markdown(f"""
-        <div style="background-color:{decision_color}22; border: 2px solid {decision_color}; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 25px;">
-            <h1 style="color:{decision_color}; margin:0;">FINAL RECOMMENDATION: {final_decision}</h1>
-            <p style="color:white; margin:0;">Based on a combined analysis of Technicals, ML Forecasts, and Market Sentiment.</p>
-        </div>
-    """, unsafe_allow_html=True)
+    # Header UI
+    st.markdown(f"""<div style="border:2px solid {color}; padding:20px; border-radius:10px; text-align:center;">
+        <h1 style="color:{color};">RECOMMENDATION: {decision}</h1>
+        <p>Target Price: ${final_p:,.2f} | Win Rate: {win_rate:.1f}%</p>
+    </div>""", unsafe_allow_html=True)
 
-    # --- CHART & TABLE ---
+    # --- Charts ---
     col1, col2 = st.columns([2, 1])
-
     with col1:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7
+        # FIXED: make_subplots brackets and row_heights correctly closed
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        
+        # Candles
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+        
+        # BBands
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='gray', width=1), name="Upper BB"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', width=1), fill='tonexty', name="Lower BB"), row=1, col=1)
+        
+        # RSI
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='orange'), name="RSI"), row=2, col=1)
+        
+        fig.update_layout(template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        st.subheader("📊 Reason Matrix")
+        st.table(pd.DataFrame(reasons))
+        
+        st.subheader("📈 Signal Strength")
+        sig_fig = go.Figure(go.Pie(labels=['Buy', 'Sell', 'Hold'], values=[signals['BUY'], signals['SELL'], 2-(signals['BUY']+signals['SELL'])]))
+        sig_fig.update_layout(template="plotly_dark", height=300)
+        st.plotly_chart(sig_fig, use_container_width=True)
+
+else:
+    st.error("Connection Error. Ensure Ticker is valid.")
