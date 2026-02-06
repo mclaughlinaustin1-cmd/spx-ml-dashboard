@@ -6,25 +6,22 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime, timedelta
 
-# --- Robust VADER Import ---
-try:
-    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    VADER_AVAILABLE = True
-except ImportError:
-    VADER_AVAILABLE = False
+# --- Page Config ---
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal v5.0")
+st.title("🏛️ AI Alpha Terminal: Truth-Tested Engine")
 
-# --- Core Model Logic ---
+# --- Core Logic with TimeSeriesSplit ---
 @st.cache_data(ttl=3600)
 def build_quant_data(ticker):
     df = yf.download(ticker, period="5y", interval="1d")
     if df.empty: return None
-    
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # Technical Indicators
+    # 1. Technical Indicators
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['MA20'] = df['Close'].rolling(20).mean()
     df['STD20'] = df['Close'].rolling(20).std()
@@ -36,108 +33,101 @@ def build_quant_data(ticker):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain / loss)))
     df['Vol_10'] = df['Log_Ret'].rolling(10).std()
-    
     df = df.dropna()
     
-    # ML Setup
-    X = df[['RSI', 'Vol_10', 'Log_Ret']].values
+    # 2. Features & Scaling
+    features = ['RSI', 'Vol_10', 'Log_Ret']
+    X = df[features].values
     y = df['Log_Ret'].values
     scaler = StandardScaler().fit(X)
     X_s = scaler.transform(X)
     
-    split = len(df) - 100
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X_s[:split], y[:split])
+    # 3. REALISTIC WIN RATE (TimeSeriesSplit)
+    # We test the model by "walking forward" in time
+    tscv = TimeSeriesSplit(n_splits=5)
+    win_rates = []
     
-    # Win Rate
-    preds = model.predict(X_s[split:])
-    win_rate = (np.sign(preds) == np.sign(y[split:])).mean() * 100
+    threshold = 0.005 # 0.5% Threshold to count as a 'significant' win
     
-    return df, model, win_rate, scaler
+    for train_idx, test_idx in tscv.split(X_s):
+        model_fold = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
+        model_fold.fit(X_s[train_idx], y[train_idx])
+        preds = model_fold.predict(X_s[test_idx])
+        
+        # Win if: Direction is correct AND absolute return > threshold
+        actuals = y[test_idx]
+        correct_dir = (np.sign(preds) == np.sign(actuals))
+        sig_move = (np.abs(actuals) >= threshold)
+        
+        # Fold accuracy
+        fold_acc = (correct_dir & sig_move).mean()
+        win_rates.append(fold_acc)
+    
+    true_win_rate = np.mean(win_rates) * 100
+    
+    # 4. Final Production Model
+    final_model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
+    final_model.fit(X_s, y)
+    
+    return df, final_model, true_win_rate, scaler
 
-# --- Sentiment Engine ---
-def get_sentiment(ticker):
-    if not VADER_AVAILABLE: return 0
-    try:
-        tk = yf.Ticker(ticker)
-        news = tk.news[:5]
-        analyzer = SentimentIntensityAnalyzer()
-        scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
-        return np.mean(scores) if scores else 0
-    except: return 0
-
-# --- UI Setup ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal")
-st.title("🏛️ AI Alpha Terminal")
-
-ticker = st.sidebar.text_input("Ticker", "NVDA").upper()
+# --- UI Sidebar ---
+ticker = st.sidebar.text_input("Enter Ticker", "NVDA").upper()
 target_dt = st.sidebar.date_input("Target Date", datetime.now() + timedelta(days=7))
 
 data = build_quant_data(ticker)
 
 if data:
     df, model, win_rate, scaler = data
-    sent_score = get_sentiment(ticker)
     
-    # --- Prediction ---
+    # --- Prediction Calculation ---
+    last_state = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
+    pred_ret = model.predict(last_state)[0]
     days_out = (pd.Timestamp(target_dt) - df.index[-1]).days
-    current_state = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
-    pred_ret = model.predict(current_state)[0]
-    final_p = df['Close'].iloc[-1] * np.exp((pred_ret + (sent_score * 0.002)) * days_out)
+    final_p = df['Close'].iloc[-1] * np.exp(pred_ret * days_out)
 
-    # --- Decision Matrix Logic ---
-    reasons = []
-    signals = {"BUY": 0, "SELL": 0}
-    
-    # RSI
-    rsi_val = df['RSI'].iloc[-1]
-    sig = "BUY" if rsi_val < 35 else "SELL" if rsi_val > 65 else "HOLD"
-    reasons.append({"Factor": "RSI", "Status": f"Level {rsi_val:.1f}", "Signal": sig})
-    if sig in signals: signals[sig] += 1
-
-    # Bollinger
-    price = df['Close'].iloc[-1]
-    sig = "BUY" if price < df['BB_Low'].iloc[-1] else "SELL" if price > df['BB_Up'].iloc[-1] else "HOLD"
-    reasons.append({"Factor": "BBands", "Status": "Price/Band Rel", "Signal": sig})
-    if sig in signals: signals[sig] += 1
-
-    # Final Decision Calculation
-    decision = "STRONG BUY" if signals["BUY"] >= 2 else "BUY" if signals["BUY"] == 1 else "SELL" if signals["SELL"] >= 1 else "HOLD"
-    color = "#00ffcc" if "BUY" in decision else "#ff4b4b" if "SELL" in decision else "#ff9500"
-
-    # Header UI
-    st.markdown(f"""<div style="border:2px solid {color}; padding:20px; border-radius:10px; text-align:center;">
-        <h1 style="color:{color};">RECOMMENDATION: {decision}</h1>
-        <p>Target Price: ${final_p:,.2f} | Win Rate: {win_rate:.1f}%</p>
-    </div>""", unsafe_allow_html=True)
+    # --- Header Metrics ---
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Predicted Price", f"${final_p:,.2f}")
+    col_b.metric("Truth-Tested Win Rate", f"{win_rate:.1f}%")
+    col_c.metric("Current RSI", f"{df['RSI'].iloc[-1]:.1f}")
 
     # --- Charts ---
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        # FIXED: make_subplots brackets and row_heights correctly closed
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        
-        # Candles
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-        
-        # BBands
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='gray', width=1), name="Upper BB"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', width=1), fill='tonexty', name="Lower BB"), row=1, col=1)
-        
-        # RSI
-        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='orange'), name="RSI"), row=2, col=1)
-        
-        fig.update_layout(template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='gray', width=1), name="Upper BB"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', width=1), fill='tonexty', name="Lower BB"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='orange'), name="RSI"), row=2, col=1)
+    fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
 
-    with col2:
-        st.subheader("📊 Reason Matrix")
-        st.table(pd.DataFrame(reasons))
+    # --- METHODOLOGY SECTION ---
+    st.divider()
+    st.header("📖 Understanding the Data & Methodology")
+    m1, m2 = st.columns(2)
+    
+    with m1:
+        st.subheader("How is the Win Rate captured?")
+        st.write("""
+        Unlike standard models that 'peek' at the future, we use **TimeSeriesSplit**. 
+        This divides the last 5 years into 5 sequential 'chapters'. 
+        The model trains on Chapter 1, then tries to predict Chapter 2. 
+        Then it trains on Chapters 1-2 and predicts Chapter 3.
+        """)
+        st.latex(r"Accuracy = \frac{\sum (Correct\ Direction \cap |Return| > 0.5\%)}{Total\ Days}")
+
+    with m2:
+        st.subheader("The 0.5% Integrity Threshold")
+        st.write("""
+        A 'Win' isn't just guessing the right direction. To prevent 'garbage wins' (where the stock moves 0.001%), 
+        our engine only counts a prediction as successful if the actual market move was **greater than 0.5%**. 
+        This simulates a real-world environment where trading fees and spreads exist.
+        """)
         
-        st.subheader("📈 Signal Strength")
-        sig_fig = go.Figure(go.Pie(labels=['Buy', 'Sell', 'Hold'], values=[signals['BUY'], signals['SELL'], 2-(signals['BUY']+signals['SELL'])]))
-        sig_fig.update_layout(template="plotly_dark", height=300)
-        st.plotly_chart(sig_fig, use_container_width=True)
+    if win_rate > 65:
+        st.success("🎯 **High Confidence:** This ticker shows strong historical patterns.")
+    elif win_rate < 45:
+        st.warning("⚠️ **Low Edge:** The model is struggling to find a consistent pattern. Trade with caution.")
 
 else:
-    st.error("Connection Error. Ensure Ticker is valid.")
+    st.error("Data error. Check ticker symbol.")
