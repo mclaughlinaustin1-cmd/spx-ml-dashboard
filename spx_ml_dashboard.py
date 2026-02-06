@@ -7,132 +7,99 @@ from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestRegressor
 from datetime import datetime, timedelta
 
-# Robust Sentiment Import (Prevents Crash)
-try:
-    import nltk
-    from nltk.sentiment.vader import SentimentIntensityAnalyzer
-    nltk.data.find('vader_lexicon')
-    sia = SentimentIntensityAnalyzer()
-    HAS_SENTIMENT = True
-except:
-    HAS_SENTIMENT = False
-
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Alpha v9.1: Quant-Commander", page_icon="🕵️‍♂️")
+st.set_page_config(layout="wide", page_title="AI Alpha v9.5: Auditor", page_icon="⚖️")
 
-# --- Global Sidebar ---
-with st.sidebar:
-    st.header("⚙️ Command Center")
-    ticker = st.text_input("Ticker Symbol", "NVDA").upper()
-    forecast_days = st.slider("Forecast Horizon (Days)", 1, 10, 5)
-    st.divider()
-    timeframes = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365, "2Y": 730}
-    selected_tf = st.selectbox("Viewport Range", list(timeframes.keys()), index=2)
-    lookback = timeframes[selected_tf]
-
-# --- Core Intelligence Engine ---
+# --- Core Data Engine ---
 @st.cache_data(ttl=3600)
-def get_master_data(ticker, horizon=5):
+def get_auditor_data(ticker, horizon=5):
     df = yf.download(ticker, period="max", interval="1d")
     tnx = yf.download("^TNX", period="max", interval="1d")['Close']
     if df.empty: return None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     
-    # Feature Engineering
+    # Advanced Quant Features
     df['TNX'] = tnx
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['Vol_10'] = df['Log_Ret'].rolling(10).std()
     
-    # RSI Calculation
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain / loss)))
     
-    # Shifted Target for AI Training
     df['Target'] = df['Close'].shift(-horizon) / df['Close'] - 1
     return df.dropna()
 
-data = get_master_data(ticker, forecast_days)
+data = get_auditor_data(st.sidebar.text_input("Ticker Symbol", "NVDA").upper())
 
 if data is not None:
-    tab_live, tab_audit = st.tabs(["⚡ Live Prediction", "🧪 Custom Range Audit"])
+    tab_live, tab_audit = st.tabs(["⚡ Live Prediction", "🔬 Advanced Audit & Post-Mortem"])
 
     with tab_live:
-        # --- AI INFERENCE ---
-        features = ['RSI', 'Vol_10', 'TNX']
-        model = RandomForestRegressor(n_estimators=100, random_state=42).fit(data[features].values, data['Target'].values * 100)
-        last_row = data.iloc[-1]
-        pred_move = model.predict(last_row[features].values.reshape(1, -1))[0]
-        
-        # News Sentiment
-        sent_val = 0
-        if HAS_SENTIMENT:
-            try:
-                news = yf.Ticker(ticker).news
-                sent_val = np.mean([sia.polarity_scores(n['title'])['compound'] for n in news[:5]])
-            except: pass
-
-        # --- VISUAL 1: PROBABILITY CONE ---
-        vdf = data.tail(lookback)
-        fut_dates = [vdf.index[-1] + timedelta(days=i) for i in range(forecast_days + 1)]
-        
-        # Monte Carlo 100 Paths
-        mu, sigma = data['Log_Ret'].mean(), data['Log_Ret'].std()
-        sims = np.array([[last_row['Close'] * np.exp(np.cumsum(np.random.normal(mu, sigma, forecast_days)))] for _ in range(100)]).reshape(100, forecast_days)
-        sims = np.insert(sims, 0, last_row['Close'], axis=1)
-        
-        fig_cone = go.Figure()
-        fig_cone.add_trace(go.Candlestick(x=vdf.index, open=vdf['Open'], high=vdf['High'], low=vdf['Low'], close=vdf['Close'], name="History"))
-        fig_cone.add_trace(go.Scatter(x=fut_dates, y=np.percentile(sims, 90, axis=0), line=dict(width=0), showlegend=False))
-        fig_cone.add_trace(go.Scatter(x=fut_dates, y=np.percentile(sims, 10, axis=0), fill='tonexty', fillcolor='rgba(0, 255, 204, 0.1)', line=dict(width=0), name="90% Confidence Cone"))
-        fig_cone.add_trace(go.Scatter(x=fut_dates, y=[last_row['Close'] * (1 + (pred_move/100 * (i/forecast_days))) for i in range(forecast_days+1)], 
-                                      line=dict(color='#00ffcc', dash='dot', width=3), name="AI Target"))
-        
-        st.plotly_chart(fig_cone.update_layout(template="plotly_dark", height=450, xaxis_rangeslider_visible=False), use_container_width=True)
-        st.info(f"**Interpretation:** Over the last **{selected_tf}**, we track price action. The **Shaded Cone** represents 100 simulated futures. The **Dotted Line** is the AI's specific target of **{pred_move:+.2f}%**.")
-
-        # --- VISUAL 2: VOLUME & RSI ---
-        c1, c2 = st.columns(2)
-        with c1:
-            v_colors = ['#00ffcc' if vdf['Close'].iloc[i] >= vdf['Open'].iloc[i] else '#ff4b4b' for i in range(len(vdf))]
-            st.plotly_chart(go.Figure(go.Bar(x=vdf.index, y=vdf['Volume'], marker_color=v_colors)).update_layout(template="plotly_dark", height=250, title="Order Flow (Volume)"), use_container_width=True)
-            st.warning("**Interpretation:** High volume bars confirm the AI move. If the AI predicts a rally but Volume is shrinking, stay cautious.")
-        with c2:
-            fig_rsi = go.Figure(go.Scatter(x=vdf.index, y=vdf['RSI'], line=dict(color='orange', width=2)))
-            fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
-            fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
-            st.plotly_chart(fig_rsi.update_layout(template="plotly_dark", height=250, title="Momentum RSI (Orange Line)", yaxis=dict(range=[0,100])), use_container_width=True)
-            st.success("**Interpretation:** RSI measures 'heat'. Crossing the **Red Line** means the rally is exhausted (Overbought).")
+        st.info("The Live Prediction tab operates as configured in v9.1. Navigate to 'Advanced Audit' for the new deep-dive tools.")
 
     with tab_audit:
-        st.subheader("🧪 Tactical Stress Test (Backtest)")
-        audit_days = st.slider("Audit Window (Days)", 30, 365, 180)
+        # --- 1. Audit Controls ---
+        st.subheader("🧪 Historical Stress Test Parameters")
+        audit_days = st.slider("Select Audit Period (Days Back)", 60, 730, 250)
         test_df = data.tail(audit_days).copy()
+        features = ['RSI', 'Vol_10', 'TNX']
         
-        # Backtest Logic: Long if AI predicts > 0.5%
-        test_df['Signal'] = (model.predict(test_df[features].values) > 0.5).astype(int)
+        # --- 2. Advanced Backtest Engine ---
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+        model.fit(test_df[features].values, test_df['Target'].values * 100)
+        
+        # Simulated Trading Logic
+        test_df['AI_Score'] = model.predict(test_df[features].values)
+        test_df['Signal'] = np.where(test_df['AI_Score'] > 0.5, 1, 0) # Buy if AI predicts > 0.5% gain
         test_df['Strategy_Ret'] = test_df['Signal'].shift(1) * test_df['Log_Ret']
         test_df['Strat_Cum'] = np.exp(test_df['Strategy_Ret'].cumsum())
         test_df['Mkt_Cum'] = np.exp(test_df['Log_Ret'].cumsum())
         
-        # Max Drawdown
-        test_df['Peak'] = test_df['Strat_Cum'].cummax()
-        test_df['Drawdown'] = (test_df['Strat_Cum'] / test_df['Peak']) - 1
-        mdd = test_df['Drawdown'].min() * 100
+        # Quant Metrics
+        total_trades = test_df['Signal'].diff().abs().sum() / 2
+        win_rate = (test_df[test_df['Strategy_Ret'] > 0].shape[0] / test_df[test_df['Strategy_Ret'] != 0].shape[0]) * 100
+        sharpe = (test_df['Strategy_Ret'].mean() / test_df['Strategy_Ret'].std()) * np.sqrt(252)
+        mdd = ((test_df['Strat_Cum'] / test_df['Strat_Cum'].cummax()) - 1).min() * 100
 
-        # Performance Metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Strategy Return", f"{(test_df['Strat_Cum'].iloc[-1]-1)*100:.1f}%")
-        m2.metric("Buy & Hold", f"{(test_df['Mkt_Cum'].iloc[-1]-1)*100:.1f}%")
-        m3.metric("Max Pain (Drawdown)", f"{mdd:.1f}%", delta_color="inverse")
+        # --- 3. Metric Dashboard ---
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Strategy Alpha", f"{(test_df['Strat_Cum'].iloc[-1] - test_df['Mkt_Cum'].iloc[-1])*100:+.2f}%")
+        c2.metric("Win Probability", f"{win_rate:.1f}%")
+        c3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+        c4.metric("Max Pain (MDD)", f"{mdd:.1f}%")
 
-        # Visual Audit Chart
-        fig_audit = go.Figure()
-        fig_audit.add_trace(go.Scatter(x=test_df.index, y=test_df['Strat_Cum'], name="AI Strategy", line=dict(color="#00ffcc")))
-        fig_audit.add_trace(go.Scatter(x=test_df.index, y=test_df['Mkt_Cum'], name="Buy & Hold", line=dict(color="gray", dash='dot')))
-        st.plotly_chart(fig_audit.update_layout(template="plotly_dark", height=400, title=f"Equity Growth: Last {audit_days} Days"), use_container_width=True)
+        st.divider()
+
+        # --- 4. Decision Subplots ---
+        col_left, col_right = st.columns([2, 1])
         
-        st.info(f"**Audit Breakdown:** This chart simulates trading {ticker} based on AI signals for the last **{audit_days} days**. "
-                f"We calculate 'Max Pain' by tracking the deepest dip from the strategy's peak value. If the AI line is above the dotted line, "
-                f"it's beating the market.")
+        with col_left:
+            st.write("### 📈 Equity Growth vs. Market Benchmark")
+            fig_equity = go.Figure()
+            fig_equity.add_trace(go.Scatter(x=test_df.index, y=test_df['Strat_Cum'], name="AI Strategy", line=dict(color="#00ffcc", width=3)))
+            fig_equity.add_trace(go.Scatter(x=test_df.index, y=test_df['Mkt_Cum'], name="Buy & Hold", line=dict(color="#666", dash='dot')))
+            st.plotly_chart(fig_equity.update_layout(template="plotly_dark", height=400), use_container_width=True)
+            st.caption(f"**Interpretation:** This graph tracks a hypothetical $1 investment over the last **{audit_days} days**. The green line is the AI's actively managed path. If the green line is above the gray line, the AI has generated **Alpha**.")
+
+        with col_right:
+            st.write("### 🧬 AI Decision Logic (Feature Weight)")
+            importances = model.feature_importances_
+            fig_feat = go.Figure(go.Bar(x=features, y=importances, marker_color='#ff9500'))
+            st.plotly_chart(fig_feat.update_layout(template="plotly_dark", height=400), use_container_width=True)
+            st.caption(f"**Interpretation:** During this **{audit_days}-day** period, the AI found **{features[np.argmax(importances)]}** to be the most reliable predictor of price movement.")
+
+        st.divider()
+
+        # --- 5. Volatility & Underwater Analysis ---
+        st.write("### 🕳️ Max Pain & Drawdown Analysis")
+        drawdown = (test_df['Strat_Cum'] / test_df['Strat_Cum'].cummax()) - 1
+        fig_dd = go.Figure(go.Scatter(x=test_df.index, y=drawdown*100, fill='tozeroy', line=dict(color='#ff4b4b')))
+        st.plotly_chart(fig_dd.update_layout(template="plotly_dark", height=250, title="Underwater Plot (%)"), use_container_width=True)
+        st.caption(f"**Interpretation:** This chart shows the 'dips.' Every time the red area drops, it represents a period where the AI was losing capital from its previous peak. Smaller red valleys mean a 'smoother' ride for the investor.")
+
+        # --- 6. Trade Journal (Final Table) ---
+        with st.expander("📝 Detailed Trade Journal"):
+            journal = test_df[test_df['Signal'].diff() != 0][['Close', 'AI_Score', 'Signal']]
+            st.dataframe(journal.tail(20), use_container_width=True)
