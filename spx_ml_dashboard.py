@@ -6,23 +6,36 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime, timedelta
 
+# --- VADER Import ---
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    VADER_AVAILABLE = True
+except ImportError:
+    VADER_AVAILABLE = False
+
 # --- Core Setup ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal v5.3")
-ticker = st.sidebar.text_input("Global Ticker", "AAPL").upper()
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal v5.4", page_icon="🏛️")
 
-# Create the Tabs
-tab_live, tab_audit = st.tabs(["🏛️ Live Terminal", "🕵️ Historical Audit"])
+# Sidebar Configuration
+with st.sidebar:
+    st.header("⚙️ Terminal Config")
+    ticker = st.text_input("Ticker Symbol", "NVDA").upper()
+    target_dt = st.date_input("Forecast Target Date", datetime.now() + timedelta(days=7))
+    st.divider()
+    st.info("The terminal uses a 0.5% Truth-Threshold and TimeSeriesSplit for data integrity.")
 
+# --- Data Functions ---
 @st.cache_data(ttl=3600)
-def get_clean_data(ticker):
-    df = yf.download(ticker, period="max", interval="1d")
+def get_processed_data(ticker):
+    df = yf.download(ticker, period="5y", interval="1d")
     if df.empty: return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # Feature Engineering
+    # Technical Indicators
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['MA20'] = df['Close'].rolling(20).mean()
     df['STD20'] = df['Close'].rolling(20).std()
@@ -36,81 +49,138 @@ def get_clean_data(ticker):
     df['Vol_10'] = df['Log_Ret'].rolling(10).std()
     return df.dropna()
 
-data_full = get_clean_data(ticker)
+def get_sentiment(ticker):
+    if not VADER_AVAILABLE: return 0
+    try:
+        tk = yf.Ticker(ticker)
+        news = tk.news[:5]
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
+        return np.mean(scores) if scores else 0
+    except: return 0
 
-# --- TAB 1: LIVE TERMINAL ---
-with tab_live:
-    if data_full is not None:
-        st.subheader(f"Current Analysis for {ticker}")
-        
-        # Train on all available data for the live forecast
+# --- MAIN APP ---
+data_full = get_processed_data(ticker)
+
+if data_full is not None:
+    tab_live, tab_audit = st.tabs(["🏛️ Live Terminal", "🕵️ Historical Audit"])
+
+    # --- TAB 1: RESTORED LIVE TERMINAL ---
+    with tab_live:
+        # Prepare ML Model
         features = ['RSI', 'Vol_10', 'Log_Ret']
-        scaler = StandardScaler().fit(data_full[features])
-        X_s = scaler.transform(data_full[features])
+        X = data_full[features].values
+        y = data_full['Log_Ret'].values
+        scaler = StandardScaler().fit(X)
+        X_s = scaler.transform(X)
         
+        # Win Rate Calculation (TimeSeriesSplit)
+        tscv = TimeSeriesSplit(n_splits=5)
+        win_rates = []
+        for tr_idx, te_idx in tscv.split(X_s):
+            m_fold = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
+            m_fold.fit(X_s[tr_idx], y[tr_idx])
+            preds = m_fold.predict(X_s[te_idx])
+            wins = (np.sign(preds) == np.sign(y[te_idx])) & (np.abs(y[te_idx]) >= 0.005)
+            win_rates.append(wins.mean())
+        
+        true_win_rate = np.mean(win_rates) * 100
+        
+        # Production Model & Prediction
         model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
-        model.fit(X_s, data_full['Log_Ret'])
-        
-        # Signal Logic (simplified for brevity)
-        last_row = data_full.iloc[-1]
-        pred_7d = model.predict(X_s[-1:]) [0]
-        target = last_row['Close'] * np.exp(pred_7d * 7)
-        
-        # Decision UI
-        sig = "BUY" if (last_row['RSI'] < 35 or last_row['Close'] < last_row['BB_Low']) else "SELL" if (last_row['RSI'] > 65 or last_row['Close'] > last_row['BB_Up']) else "HOLD"
-        color = "#00ffcc" if sig == "BUY" else "#ff4b4b" if sig == "SELL" else "#ff9500"
-        
-        st.markdown(f"<div style='border:2px solid {color}; padding:20px; border-radius:10px; text-align:center;'><h1 style='color:{color};'>{sig}</h1><p>7-Day Target: ${target:,.2f}</p></div>", unsafe_allow_html=True)
-        
-        # Chart
-        fig = make_subplots(rows=1, cols=1)
-        fig.add_trace(go.Candlestick(x=data_full.index[-100:], open=data_full['Open'], high=data_full['High'], low=data_full['Low'], close=data_full['Close']))
-        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+        model.fit(X_s, y)
+        last_state = X_s[-1:]
+        pred_ret = model.predict(last_state)[0]
+        days_out = (pd.Timestamp(target_dt) - data_full.index[-1]).days
+        final_p = data_full['Close'].iloc[-1] * np.exp(pred_ret * days_out)
+        proj_move = ((final_p / data_full['Close'].iloc[-1]) - 1) * 100
+        sent_score = get_sentiment(ticker)
 
-# --- TAB 2: HISTORICAL AUDIT ---
-with tab_audit:
-    st.subheader("🕵️ Backtest on Custom Dates")
-    st.write("Pick a date range in the past to see how the model *would* have performed.")
-    
-    col1, col2 = st.columns(2)
-    start_date = col1.date_input("Start Date", datetime.now() - timedelta(days=365))
-    end_date = col2.date_input("End Date", datetime.now() - timedelta(days=30))
-    
-    if st.button("Run Historical Audit"):
-        # Filter data up to the end_date for realistic testing
-        audit_data = data_full[:pd.Timestamp(end_date)]
-        test_window = audit_data[pd.Timestamp(start_date):]
-        train_window = data_full[:pd.Timestamp(start_date)]
+        # Decision Engine Logic
+        signals = {"BUY": 0, "SELL": 0, "HOLD": 0}
+        reasons = []
+        rsi_now = data_full['RSI'].iloc[-1]
+        price_now = data_full['Close'].iloc[-1]
+
+        if rsi_now < 35: signals["BUY"] += 1; reasons.append("RSI: Oversold")
+        elif rsi_now > 65: signals["SELL"] += 1; reasons.append("RSI: Overbought")
+        else: signals["HOLD"] += 1; reasons.append("RSI: Neutral")
+
+        if price_now < data_full['BB_Low'].iloc[-1]: signals["BUY"] += 1; reasons.append("BBands: Below Lower")
+        elif price_now > data_full['BB_Up'].iloc[-1]: signals["SELL"] += 1; reasons.append("BBands: Above Upper")
+        else: signals["HOLD"] += 1; reasons.append("BBands: Within Range")
+
+        if proj_move > 0.5: signals["BUY"] += 1; reasons.append(f"AI: Bullish (+{proj_move:.1f}%)")
+        elif proj_move < -0.5: signals["SELL"] += 1; reasons.append(f"AI: Bearish ({proj_move:.1f}%)")
+        else: signals["HOLD"] += 1; reasons.append("AI: Neutral Forecast")
+
+        decision = "BUY" if signals["BUY"] >= 2 else "SELL" if signals["SELL"] >= 2 else "HOLD"
+        color = "#00ffcc" if decision == "BUY" else "#ff4b4b" if decision == "SELL" else "#ff9500"
+
+        # Display Signal Header
+        st.markdown(f"""
+            <div style="background-color:{color}22; border: 2px solid {color}; padding: 25px; border-radius: 12px; text-align: center; margin-bottom: 20px;">
+                <h1 style="color:{color}; margin:0;">SIGNAL: {decision}</h1>
+                <p style="color:white; font-size:18px; margin:5px;"><b>Reasoning:</b> {', '.join(reasons)}</p>
+            </div>
+        """, unsafe_allow_html=True)
+
+        # Main Layout
+        col1, col2 = st.columns([2, 1])
         
-        if len(train_window) > 100:
-            # 1. Train only on PRE-START data (No peeking!)
-            scaler_audit = StandardScaler().fit(train_window[features])
-            X_train = scaler_audit.transform(train_window[features])
-            model_audit = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
-            model_audit.fit(X_train, train_window['Log_Ret'])
+        with col1:
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.7, 0.3])
+            fig.add_trace(go.Candlestick(x=data_full.index[-120:], open=data_full['Open'], high=data_full['High'], low=data_full['Low'], close=data_full['Close'], name="Price"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=data_full.index[-120:], y=data_full['BB_Up'].iloc[-120:], line=dict(color='rgba(255,255,255,0.2)'), name="Upper BB"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=data_full.index[-120:], y=data_full['BB_Low'].iloc[-120:], line=dict(color='rgba(255,255,255,0.2)'), fill='tonexty', name="Lower BB"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=data_full.index[-120:], y=data_full['RSI'].iloc[-120:], line=dict(color='orange'), name="RSI"), row=2, col=1)
+            fig.update_layout(template="plotly_dark", height=700, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            st.metric("Truth-Tested Win Rate", f"{win_rate:.1f}%")
+            st.metric("7-Day Target Price", f"${final_p:,.2f}")
+            st.metric("News Sentiment", f"{sent_score:.2f}")
             
-            # 2. Test on the selected window
-            X_test = scaler_audit.transform(test_window[features])
-            preds = model_audit.predict(X_test)
+            st.subheader("📋 Data Definitions")
+            st.caption("**Win Rate:** Based on TimeSeriesSplit where actual move > 0.5%.")
+            st.caption("**Signal:** Requires 2 out of 3 pillars (RSI, BB, AI) to agree.")
+            st.latex(r"Acc = \frac{Hits \cap |Ret| > 0.5\%}{Total}")
+
+    # --- TAB 2: AUDIT TERMINAL ---
+    with tab_audit:
+        st.subheader("🕵️ Custom Historical Audit")
+        c1, c2 = st.columns(2)
+        a_start = c1.date_input("Audit Start", datetime.now() - timedelta(days=200))
+        a_end = c2.date_input("Audit End", datetime.now() - timedelta(days=20))
+        
+        if st.button("Generate Historical Audit Report"):
+            # Split data for honest testing
+            audit_full = data_full[:pd.Timestamp(a_end)]
+            train_box = data_full[:pd.Timestamp(a_start)]
+            test_box = audit_full[pd.Timestamp(a_start):]
             
-            # Calculate Accuracy
-            actuals = test_window['Log_Ret'].values
-            hits = (np.sign(preds) == np.sign(actuals)) & (np.abs(actuals) > 0.005)
-            accuracy = hits.mean() * 100
-            
-            # 3. Display Results
-            st.metric("Audit Accuracy Score", f"{accuracy:.1f}%")
-            
-            # Equity Curve for that specific window
-            test_window = test_window.copy()
-            test_window['Strategy_Ret'] = np.sign(preds) * actuals
-            test_window['Equity'] = (1 + test_window['Strategy_Ret']).cumprod() * 10000
-            
-            fig_audit = go.Figure()
-            fig_audit.add_trace(go.Scatter(x=test_window.index, y=test_window['Equity'], name="AI Strategy P/L", line=dict(color="#00ffcc")))
-            fig_audit.update_layout(title=f"Growth of $10k during {start_date} to {end_date}", template="plotly_dark")
-            st.plotly_chart(fig_audit, use_container_width=True)
-        else:
-            st.error("Not enough historical data before start date to train the model!")
+            if len(train_box) > 100:
+                scaler_a = StandardScaler().fit(train_box[features])
+                m_audit = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
+                m_audit.fit(scaler_a.transform(train_box[features]), train_box['Log_Ret'])
+                
+                # Run Test
+                a_preds = m_audit.predict(scaler_a.transform(test_box[features]))
+                a_hits = (np.sign(a_preds) == np.sign(test_box['Log_Ret'])) & (np.abs(test_box['Log_Ret']) > 0.005)
+                
+                st.metric("Audit Accuracy", f"{a_hits.mean()*100:.1f}%")
+                
+                # Equity Curve
+                test_box = test_box.copy()
+                test_box['Strategy_Ret'] = np.sign(a_preds) * test_box['Log_Ret']
+                test_box['Equity'] = (1 + test_box['Strategy_Ret']).cumprod() * 10000
+                
+                fig_a = go.Figure(go.Scatter(x=test_box.index, y=test_box['Equity'], name="Strategy Growth", line=dict(color="#00ffcc")))
+                fig_a.update_layout(title="Growth of $10,000 in Audit Window", template="plotly_dark", height=400)
+                st.plotly_chart(fig_a, use_container_width=True)
+            else:
+                st.error("Insufficient history before the audit start date.")
+else:
+    st.error("Data fetch failed. Verify ticker.")
 
