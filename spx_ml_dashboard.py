@@ -8,172 +8,100 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime, timedelta
 
-# --- VADER Import with Diagnostic ---
-VADER_AVAILABLE = False
-try:
-    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    VADER_AVAILABLE = True
-except ModuleNotFoundError:
-    st.warning("Sentiment engine is initializing. Please ensure 'vaderSentiment' is in requirements.txt.")
-
-# --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Quant Terminal v4.1", page_icon="🏦")
-st.markdown("""
-    <style>
-    .report-card {
-        background-color: #161b22;
-        border-radius: 10px;
-        padding: 20px;
-        border-left: 5px solid #00ffcc;
-        margin-top: 20px;
-    }
-    .stMetric { background-color: #0d1117; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- Core Logic Functions ---
-def get_sentiment_data(ticker):
-    if not VADER_AVAILABLE: return 0, []
-    try:
-        tk = yf.Ticker(ticker)
-        news = tk.news[:8]
-        analyzer = SentimentIntensityAnalyzer()
-        scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
-        return np.mean(scores) if scores else 0, news
-    except: return 0, []
-
+# --- Core Model Logic with Technical Indicators ---
 @st.cache_data(ttl=3600)
-def build_advanced_model(ticker):
-    # 1. Data Fetching
+def build_quant_data(ticker):
     df = yf.download(ticker, period="5y", interval="1d")
     if df.empty: return None
+    
+    # Fix MultiIndex for recent yfinance versions
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # 2. Technical Feature Engineering
+    # Log Returns for Stationarity
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
-    df['Vol_10'] = df['Log_Ret'].rolling(10).std()
+    
+    # Bollinger Bands Calculation (20-day SMA +/- 2 Std Dev)
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['20STD'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['MA20'] + (df['20STD'] * 2)
+    df['BB_Lower'] = df['MA20'] - (df['20STD'] * 2)
     
     # RSI Calculation
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain / loss)))
     
-    # Bollinger Bands
-    df['MA20'] = df['Close'].rolling(20).mean()
-    df['BB_Up'] = df['MA20'] + (df['Close'].rolling(20).std() * 2)
-    df['BB_Low'] = df['MA20'] - (df['Close'].rolling(20).std() * 2)
-    
-    # 3. Earnings Data (BUG FIX APPLIED HERE)
-    tk = yf.Ticker(ticker)
-    next_earnings = None
-    try:
-        calendar = tk.calendar
-        if isinstance(calendar, pd.DataFrame) and not calendar.empty:
-            next_earnings = calendar.iloc[0, 0]
-        elif isinstance(calendar, dict) and 'Earnings Date' in calendar:
-            next_earnings = calendar['Earnings Date'][0]
-    except:
-        pass
-
-    # 4. Machine Learning
+    # ML Prep
+    df['Vol_10'] = df['Log_Ret'].rolling(10).std()
     df = df.dropna()
-    X = df[['RSI', 'Vol_10', 'Log_Ret']].values
+    
+    features = ['RSI', 'Vol_10', 'Log_Ret']
+    X = df[features].values
     y = df['Log_Ret'].values
     
     scaler = StandardScaler().fit(X)
     X_s = scaler.transform(X)
     
-    # Train / Backtest Split
     split = len(df) - 100
-    model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_s[:split], y[:split])
     
-    # Win Rate (Directional Accuracy)
+    # Win Rate Calculation
     preds = model.predict(X_s[split:])
     win_rate = (np.sign(preds) == np.sign(y[split:])).mean() * 100
     
-    return df, model, win_rate, scaler, next_earnings
+    return df, model, win_rate, scaler
 
 # --- UI Layout ---
-st.title("🏛️ Institutional AI Quant Terminal v4.1")
-ticker_input = st.sidebar.text_input("Ticker Symbol", "TSLA").upper()
-target_date = st.sidebar.date_input("Analysis Target Date", datetime.now() + timedelta(days=14))
+st.set_page_config(layout="wide", page_title="AI Quant Terminal v4.2")
+st.title("🏛️ AI Quant Terminal: Bollinger Strategy")
 
-data = build_advanced_model(ticker_input)
+ticker = st.sidebar.text_input("Enter Ticker", "NVDA").upper()
+target_dt = st.sidebar.date_input("Target Date", datetime.now() + timedelta(days=10))
+
+data = build_quant_data(ticker)
 
 if data:
-    df, model, win_rate, scaler, earnings_date = data
-    sent_score, news = get_sentiment_data(ticker_input)
+    df, model, win_rate, scaler = data
     
-    # --- Metrics ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Model Win-Rate", f"{win_rate:.1f}%")
-    c2.metric("Market Sentiment", "Bullish" if sent_score > 0.05 else "Bearish", f"{sent_score:.2f}")
-    c3.metric("RSI (14d)", f"{df['RSI'].iloc[-1]:.1f}")
-    c4.metric("Volatility", f"{df['Vol_10'].iloc[-1]*100:.2f}%")
+    # --- Prediction Execution ---
+    days_out = (pd.Timestamp(target_dt) - df.index[-1]).days
+    last_state = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
+    pred_ret = model.predict(last_state)[0]
+    final_price = df['Close'].iloc[-1] * np.exp(pred_ret * days_out)
 
-    # --- Prediction Calculation ---
-    days_out = (pd.Timestamp(target_date) - df.index[-1]).days
-    current_state = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
-    raw_pred_ret = model.predict(current_state)[0]
+    # --- Candlestick Chart + Bollinger Bands ---
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
     
-    # Incorporate Sentiment Bias
-    adj_ret = raw_pred_ret + (sent_score * 0.002)
-    target_price = df['Close'].iloc[-1] * np.exp(adj_ret * days_out)
-
-    # --- Main Candlestick Graph ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+    # Price and Candles
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=[df.index[-1], pd.Timestamp(target_date)], y=[df['Close'].iloc[-1], target_price], 
-                             line=dict(color='#00ffcc', width=4, dash='dashdot'), name="AI Path"), row=1, col=1)
-    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+    
+    # Bollinger Bands Overlay
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(173, 204, 255, 0.3)', width=1), name="BB Upper"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(173, 204, 255, 0.3)', width=1), fill='tonexty', fillcolor='rgba(173, 204, 255, 0.1)', name="BB Lower"), row=1, col=1)
+    
+    # Prediction Visualization
+    fig.add_trace(go.Scatter(x=[df.index[-1], pd.Timestamp(target_dt)], y=[df['Close'].iloc[-1], final_price], line=dict(color='#ff9500', width=4, dash='dot'), name="AI Prediction"), row=1, col=1)
+
+    # RSI Subplot
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#ff9500'), name="RSI"), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+    fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- Intelligence Brief ---
-    st.markdown(f"""
-    <div class="report-card">
-        <h3>🧠 Intelligence Brief: {ticker_input}</h3>
-        <p>The <b>Random Forest Ensemble</b> (Win-Rate: {win_rate:.1f}%) predicts a target price of <b>${target_price:,.2f}</b> 
-        for {target_date.strftime('%B %d, %Y')}. This represents a <b>{((target_price/df['Close'].iloc[-1])-1)*100:+.2f}%</b> move.</p>
-        <p><b>Technical Justification:</b> The model identifies current RSI momentum and historical volatility patterns as the primary drivers. 
-        Sentiment data from 8 news catalysts indicates a <b>{sent_score:.2f}</b> weighting on the expected return.</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # --- Summary Metrics & Briefing ---
+    st.subheader(f"📊 Market Intelligence Report")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Target Price", f"${final_price:,.2f}")
+    c2.metric("Directional Win-Rate", f"{win_rate:.1f}%")
+    c3.metric("BB Bandwidth", f"{((df['BB_Upper'].iloc[-1] - df['BB_Lower'].iloc[-1]) / df['MA20'].iloc[-1] * 100):.2f}%")
 
-    # --- Catalyst & Risk Matrix ---
-    st.divider()
-    l_col, r_col = st.columns(2)
-    
-    with l_col:
-        st.subheader("⚠️ Factor Risk Matrix")
-        # Map risk factors (0.0 to 1.0 scale)
-        vol_risk = min(1.0, df['Vol_10'].iloc[-1] * 60)
-        rsi_risk = abs(df['RSI'].iloc[-1] - 50) / 50
-        sent_risk = 1 - abs(sent_score)
-        
-        # Calculate Earnings Risk
-        days_to_earn = 99
-        if earnings_date:
-            try:
-                days_to_earn = (pd.Timestamp(earnings_date) - pd.Timestamp(target_date)).days
-            except: pass
-        earn_risk = 0.9 if 0 <= days_to_earn <= 7 else 0.2
+    st.info(f"**Brief:** The model has analyzed the last 5 years of {ticker} history. With a historical win-rate of **{win_rate:.1f}%**, it predicts the stock will reach **${final_price:,.2f}** by {target_dt}. The price is currently {'near the upper band' if df['Close'].iloc[-1] > df['BB_Upper'].iloc[-1] * 0.95 else 'trading within normal range'}.")
 
-        categories = ['Volatility', 'Earnings Risk', 'Sentiment Stability', 'RSI Overextension', 'Macro Drift']
-        values = [vol_risk, earn_risk, sent_risk, rsi_risk, 0.4]
+else:
+    st.error("Ticker not found or data connection error.")
 
-        fig_risk = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself', line=dict(color='#00ffcc')))
-        fig_risk.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), template="plotly_dark", height=400)
-        st.plotly_chart(fig_risk, use_container_width=True)
-        
-
-    with r_col:
-        st.subheader("📰 Recent Market Catalysts")
-        for n in news[:4]:
-            st.markdown(f"**{n['title']}**")
-            st.caption(f"Source: {n['publisher']} | [Link]({n['link']})")
-        
-        if earnings_date:
-            st.warning(f"🔔 **Upcoming Earnings Event:** {earnings_date}")
