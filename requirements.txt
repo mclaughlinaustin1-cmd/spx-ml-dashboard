@@ -2,7 +2,6 @@ streamlit
 yfinance
 pandas
 numpy
-scikit-learn
 plotly
-tensorflow
-scipy
+scikit-learn
+vaderSentiment
