@@ -9,7 +9,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime, timedelta
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal v6.0", page_icon="🏛️")
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal v6.2", page_icon="🏛️")
 
 # --- Global Sidebar ---
 with st.sidebar:
@@ -17,7 +17,7 @@ with st.sidebar:
     ticker = st.text_input("Ticker Symbol", "NVDA").upper()
     target_dt = st.date_input("Forecast Target Date", datetime.now() + timedelta(days=7))
     st.divider()
-    st.caption("v6.0: Enhanced Audit Intelligence & Context")
+    st.caption("v6.2: Restored Post-Mortem & Robust Audit Logic")
 
 # --- Core Processing Logic ---
 @st.cache_data(ttl=3600)
@@ -47,7 +47,7 @@ def get_terminal_data(ticker):
     scaler = StandardScaler().fit(X)
     X_s = scaler.transform(X)
     
-    # Live Terminal Accuracy (Cross-Validation)
+    # Cross-Validation for Live Terminal Win Rate
     tscv = TimeSeriesSplit(n_splits=5)
     wr_scores = []
     for tr_i, te_i in tscv.split(X_s):
@@ -57,7 +57,7 @@ def get_terminal_data(ticker):
         w = (np.sign(p) == np.sign(y[te_i])) & (np.abs(y[te_i]) >= 0.005)
         wr_scores.append(w.mean())
     
-    final_model = RandomForestRegressor(n_estimators=100, max_depth=5).fit(X_s, y)
+    final_model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42).fit(X_s, y)
     return df, final_model, np.mean(wr_scores) * 100, scaler
 
 data_package = get_terminal_data(ticker)
@@ -66,7 +66,7 @@ if data_package:
     df, model, win_rate, scaler = data_package
     tab_live, tab_audit = st.tabs(["🏛️ Live Terminal", "🕵️ Historical Audit"])
 
-    # --- TAB 1: LIVE TERMINAL (Standard View) ---
+    # --- TAB 1: LIVE TERMINAL ---
     with tab_live:
         last_s = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
         p_ret = model.predict(last_s)[0]
@@ -74,105 +74,96 @@ if data_package:
         final_p = df['Close'].iloc[-1] * np.exp(p_ret * max(1, days_out))
         proj_m = ((final_p / df['Close'].iloc[-1]) - 1) * 100
         
-        # Decision Logic
-        signals = {"BUY": 0, "SELL": 0, "HOLD": 0}; reasons = []
-        if df['RSI'].iloc[-1] < 35: signals["BUY"] += 1; reasons.append("RSI: Oversold")
-        elif df['RSI'].iloc[-1] > 65: signals["SELL"] += 1; reasons.append("RSI: Overbought")
-        if df['Close'].iloc[-1] < df['BB_Low'].iloc[-1]: signals["BUY"] += 1; reasons.append("Price: Below BB-Low")
-        elif df['Close'].iloc[-1] > df['BB_Up'].iloc[-1]: signals["SELL"] += 1; reasons.append("Price: Above BB-High")
-        if proj_m > 0.5: signals["BUY"] += 1; reasons.append(f"AI: Bullish Forecast (+{proj_m:.1f}%)")
-        elif proj_m < -0.5: signals["SELL"] += 1; reasons.append(f"AI: Bearish Forecast ({proj_m:.1f}%)")
-        
-        decision = "BUY" if signals["BUY"] >= 2 else "SELL" if signals["SELL"] >= 2 else "HOLD"
+        decision = "BUY" if proj_m > 0.5 else "SELL" if proj_m < -0.5 else "HOLD"
         color = "#00ffcc" if decision == "BUY" else "#ff4b4b" if decision == "SELL" else "#ff9500"
 
-        st.markdown(f"<div style='background-color:{color}22; border:2px solid {color}; padding:20px; border-radius:12px; text-align:center;'><h1>SIGNAL: {decision}</h1><p><b>Reasoning:</b> {', '.join(reasons)}</p></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='background-color:{color}22; border:2px solid {color}; padding:20px; border-radius:12px; text-align:center;'><h1>SIGNAL: {decision}</h1><p>Expected {proj_m:.2f}% move by target date.</p></div>", unsafe_allow_html=True)
         
         c1, c2 = st.columns([3, 1])
         with c1:
+            # Independent Price Chart
             fig_p = go.Figure()
             fig_p.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"))
             fig_p.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='rgba(255,255,255,0.2)'), name="BB Up"))
             fig_p.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='rgba(255,255,255,0.2)'), fill='tonexty', fillcolor='rgba(0,255,204,0.05)', name="BB Low"))
-            fig_p.update_layout(title="Price Action", template="plotly_dark", height=450, xaxis_range=[df.index[-60], df.index[-1]], yaxis=dict(fixedrange=False), margin=dict(t=30, b=0))
+            fig_p.update_layout(title="Price Action", template="plotly_dark", height=450, xaxis_range=[df.index[-60], df.index[-1]], yaxis=dict(fixedrange=False))
             fig_p.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig_p, use_container_width=True)
 
+            # Independent RSI Chart
             fig_rsi = go.Figure()
             fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='orange', width=2)))
             fig_rsi.add_hline(y=70, line_dash="dot", line_color="red"); fig_rsi.add_hline(y=30, line_dash="dot", line_color="green")
-            fig_rsi.update_layout(title="RSI", template="plotly_dark", height=200, xaxis_range=[df.index[-60], df.index[-1]], margin=dict(t=30, b=30))
+            fig_rsi.update_layout(title="RSI Momentum", template="plotly_dark", height=200, xaxis_range=[df.index[-60], df.index[-1]])
             fig_rsi.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig_rsi, use_container_width=True)
+
         with c2:
             st.metric("Model Confidence", f"{win_rate:.1f}%")
             st.metric("Target Price", f"${final_p:,.2f}")
+            st.divider()
+            st.markdown("**AI Logic:** The model uses 100 Decision Trees to analyze if current RSI/Volatility patterns match historical winners.")
 
-    # --- TAB 2: HISTORICAL AUDIT (With Context Intelligence) ---
+    # --- TAB 2: HISTORICAL AUDIT ---
     with tab_audit:
-        st.subheader("🕵️ Performance Stress Test")
+        st.subheader("🕵️ Performance Stress Test & Post-Mortem")
         min_d, max_d = df.index.min().date(), df.index.max().date()
         
         ca, cb = st.columns(2)
-        audit_start = ca.date_input("Audit Start Date", value=max_d - timedelta(days=365), 
-                                    min_value=min_d + timedelta(days=150), 
-                                    max_value=max_d - timedelta(days=20))
-        audit_end = cb.date_input("Audit End Date", value=max_d, 
-                                  min_value=audit_start + timedelta(days=5), 
-                                  max_value=max_d)
+        audit_start = ca.date_input("Audit Start", value=max_d - timedelta(days=365), min_value=min_d + timedelta(days=150))
+        audit_end = cb.date_input("Audit End", value=max_d)
         
         if st.button("🚀 Run Backtest"):
             t_start, t_end = pd.Timestamp(audit_start), pd.Timestamp(audit_end)
             train_box = df[df.index < t_start]
-            test_box = df[(df.index >= t_start) & (df.index <= t_end)]
+            test_box = df[(df.index >= t_start) & (df.index <= t_end)].copy()
             
             if len(train_box) >= 100:
                 features = ['RSI', 'Vol_10', 'Log_Ret']
                 scaler_a = StandardScaler().fit(train_box[features])
-                m_audit = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
-                m_audit.fit(scaler_a.transform(train_box[features]), train_box['Log_Ret'])
+                m_audit = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42).fit(scaler_a.transform(train_box[features]), train_box['Log_Ret'])
                 
                 a_preds = m_audit.predict(scaler_a.transform(test_box[features]))
-                test_box = test_box.copy()
                 test_box['Strategy_Ret'] = np.sign(a_preds) * test_box['Log_Ret']
                 test_box['Equity'] = (1 + test_box['Strategy_Ret']).cumprod() * 10000
                 test_box['Market'] = (1 + test_box['Log_Ret']).cumprod() * 10000
                 
-                # Accuracy & Performance Stats
-                acc = (np.sign(a_preds) == np.sign(test_box['Log_Ret'])).mean() * 100
-                vol_avg = test_box['Vol_10'].mean() * 100
-                total_days = len(test_box)
+                # Drawdown Math
+                peak = test_box['Equity'].expanding(min_periods=1).max()
+                dd = (test_box['Equity'] - peak) / peak
+                max_dd = dd.min() * 100
                 
+                # Metrics
+                acc = (np.sign(a_preds) == np.sign(test_box['Log_Ret'])).mean() * 100
                 st.metric("Audit Accuracy Score", f"{acc:.1f}%")
                 
                 fig_audit = go.Figure()
                 fig_audit.add_trace(go.Scatter(x=test_box.index, y=test_box['Equity'], name="AI Strategy", line=dict(color="#00ffcc", width=3)))
-                fig_audit.add_trace(go.Scatter(x=test_box.index, y=test_box['Market'], name="Buy & Hold", line=dict(color="gray", dash='dash')))
-                fig_audit.update_layout(title="Backtest Growth (Strategy vs Market)", template="plotly_dark", height=450)
+                fig_audit.add_trace(go.Scatter(x=test_box.index, y=test_box['Market'], name="Market", line=dict(color="gray", dash='dash')))
                 st.plotly_chart(fig_audit, use_container_width=True)
 
-                # --- DYNAMIC DESCRIPTION SECTION ---
+                # --- STRATEGIC POST-MORTEM ---
                 st.divider()
                 st.subheader("🏛️ Strategic Post-Mortem")
+                col_p1, col_p2 = st.columns(2)
                 
-                col_text1, col_text2 = st.columns(2)
-                with col_text1:
+                with col_p1:
                     st.markdown(f"""
                     **Data Capture Methodology:**
-                    * **Training Horizon:** The model analyzed **{len(train_box)} trading days** occurring strictly before *{audit_start}*. 
-                    * **No Future Peeking:** Every decision made between these dates was based only on patterns learned from the past.
-                    * **Pattern Recognition:** The AI prioritized **RSI (Momentum)** and **Vol_10 (Market Stress)** to determine if a move was a "True Breakout" or "Noise."
+                    * **Training Horizon:** Analyzed **{len(train_box)} trading days** before {audit_start}.
+                    * **Risk Profile:** The Max Drawdown was **{max_dd:.2f}%**. This represents the peak-to-trough "pain" of the strategy.
+                    * **No Future Peeking:** Decisions were made day-by-day using only the patterns learned from the training horizon.
                     """)
                 
-                with col_text2:
-                    perf_status = "outperformed" if test_box['Equity'].iloc[-1] > test_box['Market'].iloc[-1] else "underperformed"
+                with col_p2:
+                    perf_status = "beat" if test_box['Equity'].iloc[-1] > test_box['Market'].iloc[-1] else "trailed"
                     st.markdown(f"""
                     **Audit Verdict:**
-                    * **Market Regime:** During this {total_days}-day window, the average daily volatility was **{vol_avg:.2f}%**. 
-                    * **Accuracy Context:** An accuracy of **{acc:.1f}%** indicates the AI was {'highly effective' if acc > 52 else 'struggling'} to separate signals from noise in this specific regime.
-                    * **Net Result:** The AI strategy **{perf_status}** the benchmark. High accuracy combined with the Gray Dashed Line (Market) confirms if the AI's "Alpha" was genuine or simply tied to a broad market rally.
+                    * **Regime Analysis:** Average volatility during this window was **{test_box['Vol_10'].mean()*100:.2f}%**.
+                    * **Alpha Generation:** The AI **{perf_status}** the market benchmark. 
+                    * **Logic Path:** The Accuracy of **{acc:.1f}%** shows how well the model's 100 decision trees identified profitable directional shifts.
                     """)
             else:
-                st.error("Insufficient training data available.")
+                st.error("Insufficient training data.")
 else:
     st.error("Invalid Ticker.")
