@@ -2,142 +2,114 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler, PolynomialFeatures
-from sklearn.metrics import mean_absolute_error, r2_score
-from datetime import datetime, timedelta
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from datetime import datetime, timedelta
 
-# --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Quant Terminal V2", page_icon="📈")
+# --- Page Setup ---
+st.set_page_config(layout="wide", page_title="AI Quant Terminal V3", page_icon="🏦")
+st.markdown("<style>.main {background-color: #0b0e14;}</style>", unsafe_allow_html=True)
 
-st.title("🏛️ AI Quant Terminal: Feature-Engineered Model")
-st.markdown("""
-This terminal replaces simple regression with **Feature Engineering**. 
-It trains on **RSI, Volatility, and Momentum** to predict the *Expected Return* for your target date.
-""")
+# --- Core Logic: Sentiment Analysis ---
+def get_sentiment(ticker):
+    """Scrapes news and returns a sentiment score from -1 to 1."""
+    try:
+        tk = yf.Ticker(ticker)
+        news = tk.news[:10]  # Get latest 10 headlines
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
+        avg_score = np.mean(scores) if scores else 0
+        return avg_score, news
+    except:
+        return 0, []
 
-# --- Sidebar ---
-with st.sidebar:
-    st.header("⚙️ Model Parameters")
-    ticker = st.text_input("Ticker Symbol", "NVDA").upper()
-    target_date = st.date_input("Target Prediction Date", datetime.now() + timedelta(days=14))
-    
-    st.divider()
-    st.info("Logic: Predicts 'Log Returns' to maintain statistical stationarity.")
-
-# --- Data Engine & Feature Engineering ---
+# --- Core Logic: ML & Backtesting ---
 @st.cache_data(ttl=3600)
-def get_advanced_data(symbol):
-    df = yf.download(symbol, period="5y", interval="1d")
+def build_quant_model(ticker):
+    df = yf.download(ticker, period="5y", interval="1d")
     if df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
     
-    # 1. Target Variable: Log Returns (Stationary)
-    df['Returns'] = np.log(df['Close'] / df['Close'].shift(1))
-    
-    # 2. Feature Engineering (The '100x' improvement)
-    # Momentum: RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-    
-    # Volatility: ATR-like measure
+    # Feature Engineering
+    df['Returns'] = df['Close'].pct_change()
+    df['RSI'] = 100 - (100 / (1 + (df['Close'].diff().where(df['Close'].diff() > 0, 0).rolling(14).mean() / 
+                                  -df['Close'].diff().where(df['Close'].diff() < 0, 0).rolling(14).mean())))
     df['Vol_10'] = df['Returns'].rolling(10).std()
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['BB_Upper'] = df['MA20'] + (df['Close'].rolling(20).std() * 2)
+    df['BB_Lower'] = df['MA20'] - (df['Close'].rolling(20).std() * 2)
     
-    # Trend: Distance from MA
-    df['MA_Dist'] = (df['Close'] - df['Close'].rolling(20).mean()) / df['Close'].rolling(20).mean()
+    df = df.dropna()
     
-    return df.dropna()
-
-df = get_advanced_data(ticker)
-
-if df is not None:
-    # --- ML Preparation ---
-    features = ['RSI', 'Vol_10', 'MA_Dist']
+    # Backtest Logic (Last 100 days)
+    features = ['RSI', 'Vol_10', 'Returns']
     X = df[features].values
-    y = df['Returns'].values
+    y = np.where(df['Close'].shift(-5) > df['Close'], 1, 0) # 1 if price is higher in 5 days
     
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    split = len(df) - 100
+    rf = RandomForestRegressor(n_estimators=100, max_depth=5)
+    rf.fit(X[:split], df['Returns'].iloc[:split]) # Train on returns
     
-    # --- Model Training ---
-    # 1. Ridge Regression (Linear with Regularization to prevent overfitting)
-    ridge = Ridge(alpha=1.0)
-    ridge.fit(X_scaled, y)
+    # Calculate Win Rate %
+    test_preds = rf.predict(X[split:])
+    win_rate = (np.sign(test_preds) == np.sign(df['Returns'].iloc[split:])).mean() * 100
     
-    # 2. Polynomial Ridge (Non-Linear)
-    poly = PolynomialFeatures(degree=2)
-    X_poly = poly.fit_transform(X_scaled)
-    poly_ridge = Ridge(alpha=1.0)
-    poly_ridge.fit(X_poly, y)
+    return df, rf, win_rate, scaler := StandardScaler().fit(X)
+
+# --- UI Execution ---
+st.title("🏛️ Institutional AI Quant Terminal")
+ticker = st.sidebar.text_input("Enter Ticker", "NVDA").upper()
+target_date = st.sidebar.date_input("Target Date", datetime.now() + timedelta(days=10))
+
+data = build_quant_model(ticker)
+if data:
+    df, model, win_rate, scaler = data
+    sentiment_score, news_list = get_sentiment(ticker)
     
-    # 3. Random Forest (Advanced Decision Tree Ensemble)
-    rf = RandomForestRegressor(n_estimators=100, max_depth=7, random_state=42)
-    rf.fit(X_scaled, y)
-    
-    # --- Prediction for Target Date ---
-    # We use the 'Current' market state as the feature set for the future
-    current_state_scaled = X_scaled[-1].reshape(1, -1)
-    
+    # --- Metrics Row ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Model Win Rate (Hist)", f"{win_rate:.1f}%")
+    sentiment_label = "Positive" if sentiment_score > 0.05 else "Negative" if sentiment_score < -0.05 else "Neutral"
+    c2.metric("Market Sentiment", sentiment_label, f"{sentiment_score:.2f} Score")
+    c3.metric("RSI (14d)", f"{df['RSI'].iloc[-1]:.1f}")
+    c4.metric("Volatility", f"{df['Vol_10'].iloc[-1]*100:.2f}%")
+
+    # --- Prediction Logic ---
     days_out = (pd.Timestamp(target_date) - df.index[-1]).days
-    
-    # Predict Daily Expected Return
-    pred_ret_linear = ridge.predict(current_state_scaled)[0]
-    pred_ret_poly = poly_ridge.predict(poly.transform(current_state_scaled))[0]
-    pred_ret_rf = rf.predict(current_state_scaled)[0]
-    
-    # Compound returns over the horizon: Price * e^(ret * days)
-    last_price = df['Close'].iloc[-1]
-    final_price_lin = last_price * np.exp(pred_ret_linear * days_out)
-    final_price_poly = last_price * np.exp(pred_ret_poly * days_out)
-    final_price_rf = last_price * np.exp(pred_ret_rf * days_out)
+    current_feat = scaler.transform(df[['RSI', 'Vol_10', 'Returns']].tail(1).values)
+    pred_return = model.predict(current_feat)[0]
+    # Adjust prediction based on sentiment
+    adjusted_return = pred_return + (sentiment_score * 0.005) 
+    final_price = df['Close'].iloc[-1] * (1 + adjusted_return * days_out)
 
-    # --- Metrics UI ---
-    st.subheader(f"🎯 Expected Price on {target_date}")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Ridge (Linear)", f"${final_price_lin:,.2f}", f"{pred_ret_linear*100:.2f}% /day")
-    m2.metric("Poly Ridge (Non-Linear)", f"${final_price_poly:,.2f}", f"{pred_ret_poly*100:.2f}% /day")
-    m3.metric("Random Forest (Ensemble)", f"${final_price_rf:,.2f}", f"{pred_ret_rf*100:.2f}% /day")
+    st.subheader(f"🔮 AI Target: ${final_price:,.2f} on {target_date}")
 
-    # --- Visualization: Confidence Intervals ---
-    # We use historical volatility to show the 'Risk Zone'
-    recent_vol = df['Returns'].tail(30).std()
-    expected_std = recent_vol * np.sqrt(days_out)
+    # --- Advanced Candlestick Chart ---
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
     
-    upper_bound = last_price * np.exp(expected_std * 2) # 2 Std Dev
-    lower_bound = last_price * np.exp(-expected_std * 2)
-
+    # Candlesticks
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(173, 204, 255, 0.3)'), name="BB Upper"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(173, 204, 255, 0.3)'), fill='tonexty', name="BB Lower"), row=1, col=1)
     
-
-    fig = go.Figure()
-    # Historical
-    fig.add_trace(go.Scatter(x=df.index[-100:], y=df['Close'].tail(100), name="Recent History", line=dict(color="white")))
-    
-    # Prediction Range
+    # Forecast Cone
     future_dates = [df.index[-1], pd.Timestamp(target_date)]
-    fig.add_trace(go.Scatter(x=future_dates, y=[last_price, upper_bound], name="Upper Risk (95%)", line=dict(color="rgba(0, 255, 204, 0.2)", dash="dot")))
-    fig.add_trace(go.Scatter(x=future_dates, y=[last_price, lower_bound], name="Lower Risk (95%)", line=dict(color="rgba(255, 75, 75, 0.2)", dash="dot"), fill='tonexty'))
+    fig.add_trace(go.Scatter(x=future_dates, y=[df['Close'].iloc[-1], final_price], line=dict(color='#00ffcc', width=4, dash='dashdot'), name="AI Path"), row=1, col=1)
     
-    # Model Points
-    fig.add_trace(go.Scatter(x=[target_date], y=[final_price_rf], mode="markers+text", name="RF Target", text=[f"${final_price_rf:.2f}"], textposition="top center", marker=dict(size=12, color="#ff9500")))
+    # RSI Subplot
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#ff9500'), name="RSI"), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
 
-    fig.update_layout(template="plotly_dark", title="Expected Path & Statistical Volatility Cone", height=600)
+    fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- Accuracy Assessment ---
-    with st.expander("📊 Why is this 100x better? (Model Validation)"):
-        st.write("""
-        1. **Log Returns:** By predicting percentage changes rather than price, we ensure the model isn't biased by the stock's growth over 5 years.
-        2. **Stationarity:** We converted non-stationary price data into stationary returns.
-        3. **Ensemble Learning:** Random Forest uses 100 different decision trees to 'vote' on the outcome, reducing the error of a single tree.
-        4. **Volatility Cone:** We acknowledge that prediction is uncertain. The shaded area represents a 95% confidence interval based on recent market volatility.
-        """)
-
-    
-
-else:
-    st.error("Connection to Financial Data Stream failed.")
+    # --- News Sentiment Feed ---
+    with st.expander("📰 Latest Institutional News & Sentiment"):
+        for n in news_list:
+            st.write(f"**{n['title']}**")
+            st.caption(f"Source: {n['publisher']} | [Link]({n['link']})")
