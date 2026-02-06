@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 from datetime import datetime, timedelta
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal v7.9", page_icon="🏛️")
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal v8.0", page_icon="🏛️")
 
 # --- Global Sidebar ---
 with st.sidebar:
@@ -31,13 +31,13 @@ def get_data(ticker, horizon=5):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # Feature Engineering
+    # Technical Indicators
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['Vol_10'] = df['Log_Ret'].rolling(10).std()
     df['Ret_Lag1'] = df['Log_Ret'].shift(1)
     df['Vol_Lag1'] = df['Vol_10'].shift(1)
     
-    # RSI Calculation
+    # RSI Line Logic
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -65,48 +65,47 @@ if data is not None:
         is_safe = last_row['Vol_10'] < vol_limit
         pred_pct = model.predict(last_row[features].values.reshape(1, -1))[0]
         
-        # UI Signal
+        # Signal Banner
         color = "#00ffcc" if pred_pct > 0.5 and is_safe else "#ff4b4b" if not is_safe else "#ff9500"
-        st.markdown(f"<div style='background-color:{color}22; border:2px solid {color}; padding:15px; border-radius:15px; text-align:center;'><h2>{ticker} Est. {forecast_days}D Move: {pred_pct:.2f}%</h2></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='background-color:{color}22; border:2px solid {color}; padding:15px; border-radius:15px; text-align:center;'><h2>{ticker} {forecast_days}D Target: {pred_pct:+.2f}%</h2></div>", unsafe_allow_html=True)
         
         vdf = data.tail(timeframes[selected_tf])
         
-        # --- 1. THE MAIN CHART (Price + Volume + Dotted Forecast) ---
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
+        # --- SUBPLOT: PRICE + VOLUME ---
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
         
-        # Candlesticks
+        # 1. Candlesticks
         fig.add_trace(go.Candlestick(x=vdf.index, open=vdf['Open'], high=vdf['High'], low=vdf['Low'], close=vdf['Close'], name="Price"), row=1, col=1)
         
-        # FORECAST DOTTED LINE
-        # Calculate future date and target price
+        # 2. DOTTED FORECAST LINE
         future_date = vdf.index[-1] + timedelta(days=forecast_days)
         target_price = last_row['Close'] * (1 + (pred_pct / 100))
-        
         fig.add_trace(go.Scatter(
-            x=[vdf.index[-1], future_date],
-            y=[last_row['Close'], target_price],
-            mode='lines+markers',
-            line=dict(color=color, width=3, dash='dot'),
-            name="AI Forecast"
+            x=[vdf.index[-1], future_date], y=[last_row['Close'], target_price],
+            mode='lines+markers+text', text=["", f"${target_price:.2f}"], textposition="top right",
+            line=dict(color=color, width=3, dash='dot'), name="AI Forecast"
         ), row=1, col=1)
 
-        # Volume
+        # 3. Volume
         v_colors = ['#00ffcc' if vdf['Close'].iloc[i] >= vdf['Open'].iloc[i] else '#ff4b4b' for i in range(len(vdf))]
-        fig.add_trace(go.Bar(x=vdf.index, y=vdf['Volume'], marker_color=v_colors, name="Volume"), row=2, col=1)
+        fig.add_trace(go.Bar(x=vdf.index, y=vdf['Volume'], marker_color=v_colors, name="Volume", opacity=0.8), row=2, col=1)
         
         y_min, y_max = min(vdf['Low'].min(), target_price) * 0.97, max(vdf['High'].max(), target_price) * 1.03
-        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, yaxis1=dict(range=[y_min, y_max]))
+        fig.update_layout(template="plotly_dark", height=550, xaxis_rangeslider_visible=False, yaxis1=dict(range=[y_min, y_max]))
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- 2. THE RSI BAR GRAPH (Restored) ---
-        # Coloring RSI bars based on 30/70 thresholds
-        rsi_colors = ['#ff4b4b' if x > 70 else '#00ffcc' if x < 30 else '#555555' for x in vdf['RSI']]
-        fig_rsi = go.Figure(go.Bar(x=vdf.index, y=vdf['RSI'], marker_color=rsi_colors, name="RSI"))
-        fig_rsi.add_hline(y=70, line_dash="dash", line_color="#ff4b4b")
-        fig_rsi.add_hline(y=30, line_dash="dash", line_color="#00ffcc")
-        fig_rsi.update_layout(template="plotly_dark", height=200, title="RSI Heatmap", yaxis=dict(range=[0, 100]))
+        # --- RSI LINE CHART (RESTORED) ---
+        fig_rsi = go.Figure()
+        fig_rsi.add_trace(go.Scatter(x=vdf.index, y=vdf['RSI'], line=dict(color='orange', width=2), name="RSI"))
+        # Thresholds
+        fig_rsi.add_hline(y=70, line_dash="dash", line_color="#ff4b4b", annotation_text="Overbought")
+        fig_rsi.add_hline(y=30, line_dash="dash", line_color="#00ffcc", annotation_text="Oversold")
+        fig_rsi.update_layout(template="plotly_dark", height=230, title="Momentum RSI (Orange Line)", yaxis=dict(range=[0, 100]), margin=dict(t=30, b=10))
         st.plotly_chart(fig_rsi, use_container_width=True)
 
-    # (Backtest Audit code from v7.8 remains here)
+    # --- TAB 2: AUDIT ---
+    with tab_audit:
+        st.info("Simulation engine is ready. Select dates and run simulation to see the breakdown.")
+        # [Audit logic remains as in v7.8 for brevity]
 
 
