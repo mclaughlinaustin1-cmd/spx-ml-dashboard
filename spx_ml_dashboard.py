@@ -9,7 +9,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime, timedelta
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal v5.9", page_icon="🏛️")
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal v6.0", page_icon="🏛️")
 
 # --- Global Sidebar ---
 with st.sidebar:
@@ -17,12 +17,11 @@ with st.sidebar:
     ticker = st.text_input("Ticker Symbol", "NVDA").upper()
     target_dt = st.date_input("Forecast Target Date", datetime.now() + timedelta(days=7))
     st.divider()
-    st.caption("v5.9: 10-Year Historical Audit Support")
+    st.caption("v6.0: Enhanced Audit Intelligence & Context")
 
 # --- Core Processing Logic ---
 @st.cache_data(ttl=3600)
 def get_terminal_data(ticker):
-    # Expanded to 10 years to support deeper audits
     df = yf.download(ticker, period="10y", interval="1d")
     if df.empty: return None
     if isinstance(df.columns, pd.MultiIndex):
@@ -48,7 +47,7 @@ def get_terminal_data(ticker):
     scaler = StandardScaler().fit(X)
     X_s = scaler.transform(X)
     
-    # Cross-Validation for Live Terminal Win Rate
+    # Live Terminal Accuracy (Cross-Validation)
     tscv = TimeSeriesSplit(n_splits=5)
     wr_scores = []
     for tr_i, te_i in tscv.split(X_s):
@@ -67,7 +66,7 @@ if data_package:
     df, model, win_rate, scaler = data_package
     tab_live, tab_audit = st.tabs(["🏛️ Live Terminal", "🕵️ Historical Audit"])
 
-    # --- TAB 1: LIVE TERMINAL ---
+    # --- TAB 1: LIVE TERMINAL (Standard View) ---
     with tab_live:
         last_s = scaler.transform(df[['RSI', 'Vol_10', 'Log_Ret']].tail(1).values)
         p_ret = model.predict(last_s)[0]
@@ -75,6 +74,7 @@ if data_package:
         final_p = df['Close'].iloc[-1] * np.exp(p_ret * max(1, days_out))
         proj_m = ((final_p / df['Close'].iloc[-1]) - 1) * 100
         
+        # Decision Logic
         signals = {"BUY": 0, "SELL": 0, "HOLD": 0}; reasons = []
         if df['RSI'].iloc[-1] < 35: signals["BUY"] += 1; reasons.append("RSI: Oversold")
         elif df['RSI'].iloc[-1] > 65: signals["SELL"] += 1; reasons.append("RSI: Overbought")
@@ -104,29 +104,25 @@ if data_package:
             fig_rsi.update_layout(title="RSI", template="plotly_dark", height=200, xaxis_range=[df.index[-60], df.index[-1]], margin=dict(t=30, b=30))
             fig_rsi.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig_rsi, use_container_width=True)
-
         with c2:
             st.metric("Model Confidence", f"{win_rate:.1f}%")
             st.metric("Target Price", f"${final_p:,.2f}")
 
-    # --- TAB 2: HISTORICAL AUDIT (10-YEAR READY) ---
+    # --- TAB 2: HISTORICAL AUDIT (With Context Intelligence) ---
     with tab_audit:
-        st.subheader("🕵️ 10-Year Performance Audit")
+        st.subheader("🕵️ Performance Stress Test")
         min_d, max_d = df.index.min().date(), df.index.max().date()
         
         ca, cb = st.columns(2)
-        # Allows selection from 10 years ago up to now
         audit_start = ca.date_input("Audit Start Date", value=max_d - timedelta(days=365), 
-                                    min_value=min_d + timedelta(days=150), # Buffer for initial training
+                                    min_value=min_d + timedelta(days=150), 
                                     max_value=max_d - timedelta(days=20))
-        
         audit_end = cb.date_input("Audit End Date", value=max_d, 
                                   min_value=audit_start + timedelta(days=5), 
                                   max_value=max_d)
         
         if st.button("🚀 Run Backtest"):
             t_start, t_end = pd.Timestamp(audit_start), pd.Timestamp(audit_end)
-            # HONEST AUDIT: Model only knows data strictly BEFORE the start date
             train_box = df[df.index < t_start]
             test_box = df[(df.index >= t_start) & (df.index <= t_end)]
             
@@ -138,22 +134,45 @@ if data_package:
                 
                 a_preds = m_audit.predict(scaler_a.transform(test_box[features]))
                 test_box = test_box.copy()
-                # Strategy: If AI predicts positive, go long. If negative, stay in cash (or go short)
                 test_box['Strategy_Ret'] = np.sign(a_preds) * test_box['Log_Ret']
                 test_box['Equity'] = (1 + test_box['Strategy_Ret']).cumprod() * 10000
                 test_box['Market'] = (1 + test_box['Log_Ret']).cumprod() * 10000
                 
-                # Metrics
+                # Accuracy & Performance Stats
                 acc = (np.sign(a_preds) == np.sign(test_box['Log_Ret'])).mean() * 100
+                vol_avg = test_box['Vol_10'].mean() * 100
+                total_days = len(test_box)
+                
                 st.metric("Audit Accuracy Score", f"{acc:.1f}%")
                 
                 fig_audit = go.Figure()
                 fig_audit.add_trace(go.Scatter(x=test_box.index, y=test_box['Equity'], name="AI Strategy", line=dict(color="#00ffcc", width=3)))
                 fig_audit.add_trace(go.Scatter(x=test_box.index, y=test_box['Market'], name="Buy & Hold", line=dict(color="gray", dash='dash')))
-                fig_audit.update_layout(title=f"Backtest Growth: {audit_start} to {audit_end}", template="plotly_dark", height=450)
+                fig_audit.update_layout(title="Backtest Growth (Strategy vs Market)", template="plotly_dark", height=450)
                 st.plotly_chart(fig_audit, use_container_width=True)
-            else:
-                st.error("Insufficient training data available before the chosen Start Date.")
-else:
-    st.error("Invalid Ticker or No Data Found.")
 
+                # --- DYNAMIC DESCRIPTION SECTION ---
+                st.divider()
+                st.subheader("🏛️ Strategic Post-Mortem")
+                
+                col_text1, col_text2 = st.columns(2)
+                with col_text1:
+                    st.markdown(f"""
+                    **Data Capture Methodology:**
+                    * **Training Horizon:** The model analyzed **{len(train_box)} trading days** occurring strictly before *{audit_start}*. 
+                    * **No Future Peeking:** Every decision made between these dates was based only on patterns learned from the past.
+                    * **Pattern Recognition:** The AI prioritized **RSI (Momentum)** and **Vol_10 (Market Stress)** to determine if a move was a "True Breakout" or "Noise."
+                    """)
+                
+                with col_text2:
+                    perf_status = "outperformed" if test_box['Equity'].iloc[-1] > test_box['Market'].iloc[-1] else "underperformed"
+                    st.markdown(f"""
+                    **Audit Verdict:**
+                    * **Market Regime:** During this {total_days}-day window, the average daily volatility was **{vol_avg:.2f}%**. 
+                    * **Accuracy Context:** An accuracy of **{acc:.1f}%** indicates the AI was {'highly effective' if acc > 52 else 'struggling'} to separate signals from noise in this specific regime.
+                    * **Net Result:** The AI strategy **{perf_status}** the benchmark. High accuracy combined with the Gray Dashed Line (Market) confirms if the AI's "Alpha" was genuine or simply tied to a broad market rally.
+                    """)
+            else:
+                st.error("Insufficient training data available.")
+else:
+    st.error("Invalid Ticker.")
