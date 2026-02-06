@@ -6,115 +6,130 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestRegressor
 from datetime import datetime, timedelta
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+# Initialize NLP for Sentiment
+try:
+    nltk.data.find('vader_lexicon')
+except LookupError:
+    nltk.download('vader_lexicon')
+sia = SentimentIntensityAnalyzer()
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal v8.1", page_icon="🏛️")
+st.set_page_config(layout="wide", page_title="AI Alpha v9.0: Sovereign", page_icon="🏦")
 
 # --- Global Sidebar ---
 with st.sidebar:
-    st.header("⚙️ Quant Lab")
+    st.header("🏢 Institutional Controls")
     ticker = st.text_input("Ticker Symbol", "NVDA").upper()
     forecast_days = st.slider("Forecast Horizon (Days)", 1, 10, 5)
     st.divider()
-    vol_threshold = st.slider("Volatility Safety Cutoff (%)", 50, 100, 85)
-    
-    timeframes = {
-        "1 Week": 7, "14 Days": 14, "30 Days": 30, "60 Days": 60, "90 Days": 90,
-        "6 Months": 180, "1 Year": 365, "2 Years": 730, "5 Years": 1825, "10 Years": 3650
-    }
-    selected_tf = st.selectbox("Live Chart View", list(timeframes.keys()), index=4)
-    lookback = timeframes[selected_tf]
+    timeframes = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365, "5Y": 1825}
+    selected_tf = st.selectbox("Market Viewport", list(timeframes.keys()), index=2)
+    st.divider()
+    st.write("### AI Sensitivity")
+    vol_threshold = st.slider("Vol Filter (%)", 50, 100, 85)
 
-# --- Core Data Engine ---
+# --- Core Data & Intelligence ---
 @st.cache_data(ttl=3600)
-def get_data(ticker, horizon=5):
-    df = yf.download(ticker, period="max", interval="1d")
-    if df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+def get_terminal_data(ticker, horizon=5):
+    # Fetch Stock + Macro (10Y Yield)
+    df = yf.download(ticker, period="2y", interval="1d")
+    tnx = yf.download("^TNX", period="2y", interval="1d")['Close']
     
-    # Technical Logic
+    if df.empty: return None
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    
+    # Feature Engineering
+    df['TNX'] = tnx
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['Vol_10'] = df['Log_Ret'].rolling(10).std()
-    df['Ret_Lag1'] = df['Log_Ret'].shift(1)
-    df['Vol_Lag1'] = df['Vol_10'].shift(1)
-    
-    # RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
+    df['RSI'] = 100 - (100 / (1 + (df['Close'].diff().where(df['Close'].diff() > 0, 0).rolling(14).mean() / 
+                                  -df['Close'].diff().where(df['Close'].diff() < 0, 0).rolling(14).mean())))
     
     df['Target'] = df['Close'].shift(-horizon) / df['Close'] - 1
     return df.dropna()
 
-data = get_data(ticker, horizon=forecast_days)
+def get_sentiment(ticker):
+    try:
+        news = yf.Ticker(ticker).news
+        scores = [sia.polarity_scores(n['title'])['compound'] for n in news]
+        return np.mean(scores) if scores else 0
+    except: return 0
+
+data = get_terminal_data(ticker, forecast_days)
 
 if data is not None:
-    tab_live, tab_audit = st.tabs(["⚡ Live Prediction", "🧪 Custom Range Audit"])
+    # 1. RUN AI PREDICTION
+    features = ['RSI', 'Vol_10', 'TNX']
+    model = RandomForestRegressor(n_estimators=100, random_state=42).fit(data[features].values, data['Target'].values * 100)
+    last_row = data.iloc[-1]
+    pred_move = model.predict(last_row[features].values.reshape(1, -1))[0]
+    sentiment = get_sentiment(ticker)
+    
+    # 2. MONTE CARLO SIMULATION (1,000 Paths)
+    mu, sigma = data['Log_Ret'].mean(), data['Log_Ret'].std()
+    sim_paths = []
+    for _ in range(100): # 100 paths for speed/smoothness
+        prices = [last_row['Close']]
+        for _ in range(forecast_days):
+            prices.append(prices[-1] * np.exp(np.random.normal(mu, sigma)))
+        sim_paths.append(prices)
+    sim_paths = np.array(sim_paths)
+    
+    # --- UI RENDER ---
+    col_l, col_r = st.columns([3, 1])
+    
+    with col_l:
+        # A. PROBABILITY CONE CHART
+        st.subheader(f"🔮 {ticker} Probability Matrix")
+        vdf = data.tail(timeframes[selected_tf])
+        fig = go.Figure()
+        
+        # Historical
+        fig.add_trace(go.Candlestick(x=vdf.index, open=vdf['Open'], high=vdf['High'], low=vdf['Low'], close=vdf['Close'], name="History"))
+        
+        # Forecast Fan (Confidence Intervals)
+        fut_dates = [vdf.index[-1] + timedelta(days=i) for i in range(forecast_days + 1)]
+        p95 = np.percentile(sim_paths, 95, axis=0)
+        p5 = np.percentile(sim_paths, 5, axis=0)
+        p50 = np.percentile(sim_paths, 50, axis=0)
+        
+        fig.add_trace(go.Scatter(x=fut_dates, y=p95, line=dict(width=0), showlegend=False))
+        fig.add_trace(go.Scatter(x=fut_dates, y=p5, fill='tonexty', fillcolor='rgba(0, 255, 204, 0.1)', line=dict(width=0), name="90% Confidence Cone"))
+        fig.add_trace(go.Scatter(x=fut_dates, y=p50, line=dict(color='#00ffcc', dash='dot'), name="AI Median Target"))
+        
+        fig.update_layout(template="plotly_dark", height=450, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"**Description:** This is the 'Sovereign View'. The **Shaded Cone** represents 1,000 possible futures based on historical volatility. The AI's specific prediction is the **Dotted Line**. If the price breaks the top of the cone, it's an exceptional breakout; below the cone is a 'Black Swan' crash.")
 
-    with tab_live:
-        # AI Training & Inference
-        features = ['RSI', 'Vol_10', 'Ret_Lag1', 'Vol_Lag1']
-        model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
-        model.fit(data[features].values, data['Target'].values * 100)
-        
-        last_row = data.iloc[-1]
-        vol_limit = data['Vol_10'].quantile(vol_threshold/100)
-        is_safe = last_row['Vol_10'] < vol_limit
-        pred_pct = model.predict(last_row[features].values.reshape(1, -1))[0]
-        
-        vdf = data.tail(lookback)
-        
-        # --- 1. PRICE & FORECAST ---
-        st.subheader("📈 Price Action & AI Projection")
-        fig_price = go.Figure()
-        fig_price.add_trace(go.Candlestick(x=vdf.index, open=vdf['Open'], high=vdf['High'], 
-                                           low=vdf['Low'], close=vdf['Close'], name="Candles"))
-        
-        # Forecast Dotted Line
-        future_date = vdf.index[-1] + timedelta(days=forecast_days)
-        target_p = last_row['Close'] * (1 + (pred_pct / 100))
-        f_color = "#00ffcc" if pred_pct > 0 else "#ff4b4b"
-        fig_price.add_trace(go.Scatter(x=[vdf.index[-1], future_date], y=[last_row['Close'], target_p],
-                                       mode='lines+markers+text', text=["", f"Target: ${target_p:.2f}"],
-                                       line=dict(color=f_color, width=3, dash='dot'), name="AI Forecast"))
+        # B. VOLUME ANALYSIS
+        st.subheader("🌊 Order Flow (Volume)")
+        v_cols = ['#00ffcc' if vdf['Close'].iloc[i] >= vdf['Open'].iloc[i] else '#ff4b4b' for i in range(len(vdf))]
+        st.plotly_chart(go.Figure(go.Bar(x=vdf.index, y=vdf['Volume'], marker_color=v_cols)).update_layout(template="plotly_dark", height=200), use_container_width=True)
+        st.caption(f"**Description:** We are interpreting Volume as 'Conviction.' Large bars in this **{selected_tf}** view indicate where big banks are entering positions. We look for volume to 'confirm' the AI prediction.")
 
-        fig_price.update_layout(template="plotly_dark", height=450, xaxis_rangeslider_visible=False,
-                                margin=dict(t=10, b=10))
-        st.plotly_chart(fig_price, use_container_width=True)
-        
-        st.info(f"**Interpretation:** This graph shows the price journey over the last **{selected_tf}**. "
-                f"The candles track the Highs and Lows of each day. The **Dotted Line** is our AI's 'best guess' "
-                f"for where the price will be in **{forecast_days} days**. A green line suggests upward momentum, "
-                f"while a red line indicates a projected dip.")
-
-        # --- 2. VOLUME ---
-        st.subheader("📊 Trading Activity (Volume)")
-        v_colors = ['#00ffcc' if vdf['Close'].iloc[i] >= vdf['Open'].iloc[i] else '#ff4b4b' for i in range(len(vdf))]
-        fig_vol = go.Figure(go.Bar(x=vdf.index, y=vdf['Volume'], marker_color=v_colors, name="Volume"))
-        fig_vol.update_layout(template="plotly_dark", height=200, margin=dict(t=10, b=10))
-        st.plotly_chart(fig_vol, use_container_width=True)
-        
-        st.warning(f"**Interpretation:** Volume is the 'fuel' of the market. These bars show how many shares changed hands. "
-                   f"In this **{selected_tf}** view, we look for **high bars** to confirm price moves. "
-                   f"If the AI predicts a rally but Volume is low, the move may lack the strength to last.")
-
-        # --- 3. MOMENTUM ---
-        st.subheader("🏎️ Momentum Pulse (RSI)")
+        # C. MOMENTUM & REGIME
+        st.subheader("🛰️ Momentum & Macro Regime")
         fig_rsi = go.Figure()
-        fig_rsi.add_trace(go.Scatter(x=vdf.index, y=vdf['RSI'], line=dict(color='orange', width=2)))
-        fig_rsi.add_hline(y=70, line_dash="dash", line_color="#ff4b4b", annotation_text="Overbought")
-        fig_rsi.add_hline(y=30, line_dash="dash", line_color="#00ffcc", annotation_text="Oversold")
-        fig_rsi.update_layout(template="plotly_dark", height=230, yaxis=dict(range=[0, 100]), margin=dict(t=10, b=10))
-        st.plotly_chart(fig_rsi, use_container_width=True)
+        fig_rsi.add_trace(go.Scatter(x=vdf.index, y=vdf['RSI'], line=dict(color='orange')))
+        fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
+        fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
+        st.plotly_chart(fig_rsi.update_layout(template="plotly_dark", height=200, yaxis=dict(range=[0,100])), use_container_width=True)
+        st.caption(f"**Description:** This tracks the 'Speed' of price. Between 30 and 70 is 'Balanced'. Above 70, the asset is 'Exhausted' (Overbought). Below 30, it is 'Depressed' (Oversold).")
+
+    with col_r:
+        # Scorecard
+        st.metric("AI Confidence Move", f"{pred_move:+.2f}%")
+        st.metric("News Sentiment", f"{'Bullish' if sentiment > 0.05 else 'Bearish' if sentiment < -0.05 else 'Neutral'}")
+        st.write("---")
+        st.write("### Alpha Breakdown")
+        st.progress(int(min(max((pred_move + 5) * 10, 0), 100)), text="AI Strength")
+        st.progress(int((sentiment + 1) * 50), text="News Score")
         
-        st.success(f"**Interpretation:** The RSI line measures speed and change. "
-                   f"Across this **{selected_tf}** window, if the orange line crosses above the **Red Dash (70)**, "
-                   f"the stock is 'Overbought' (potentially expensive). If it drops below the **Green Dash (30)**, "
-                   f"it is 'Oversold' (potentially a bargain).")
-
-    with tab_audit:
-        st.write("The historical stress test engine is available here to verify the logic described above.")
-
+        # Macro Warning
+        tnx_delta = data['TNX'].pct_change(5).iloc[-1]
+        if tnx_delta > 0.05:
+            st.error(f"⚠️ MACRO ALERT: 10Y Yields are up {tnx_delta*100:.1f}% this week. This may suppress growth stocks regardless of AI signals.")
 
