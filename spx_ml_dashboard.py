@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="Institutional Earnings Terminal", page_icon="🏦")
+st.set_page_config(layout="wide", page_title="AI Terminal: Earnings & Volatility", page_icon="🏛️")
 
 # --- Custom Styling ---
 st.markdown("""
@@ -15,9 +15,9 @@ st.markdown("""
     .main { background-color: #0b0e14; }
     .report-box { 
         background-color: #161b22; 
-        border-left: 5px solid #ff9500; 
+        border-left: 5px solid #00ffcc; 
         padding: 20px; 
-        border-radius: 5px; 
+        border-radius: 8px; 
         margin-bottom: 25px;
     }
     .status-up { color: #00ffcc; font-weight: bold; }
@@ -25,156 +25,127 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- Logic Modules ---
+# --- Core Logic ---
 
 @st.cache_data(ttl=3600)
-def fetch_raw_data(ticker):
-    """
-    Fetches only serializable data. 
-    Returning a Ticker object causes the UnserializableReturnValueError.
-    """
+def fetch_serializable_data(ticker):
+    """Fetches data and ensures all return types are serializable for Streamlit caching."""
     try:
         tk = yf.Ticker(ticker)
-        # 1. Fetch Price History
         df = tk.history(period="1y", interval="1d")
-        if df.empty:
-            return None, None
+        if df.empty: return None, None
         
-        # Standardize columns
+        # Flatten MultiIndex if present
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 2. Extract Earnings Date as a string/simple date
+        # Extract Earnings Date
         earnings_date = None
         try:
-            calendar = tk.calendar
-            if calendar is not None and not calendar.empty:
-                if isinstance(calendar, pd.DataFrame):
-                    earnings_date = calendar.iloc[0, 0]
-                else:
-                    earnings_date = calendar.get('Earnings Date', [None])[0]
-        except:
-            pass
+            cal = tk.calendar
+            if cal is not None and not cal.empty:
+                earnings_date = cal.iloc[0, 0] if isinstance(cal, pd.DataFrame) else cal.get('Earnings Date', [None])[0]
+        except: pass
             
         return df, earnings_date
-    except Exception as e:
+    except:
         return None, None
 
-def get_ai_narrative(poly_coeffs, forecast_days, current_price, end_price, earnings_date):
-    """Generates the descriptive analysis of the projection."""
-    a, b, c = poly_coeffs
-    direction = "BULLISH" if end_price > current_price else "BEARISH"
-    change_pct = ((end_price - current_price) / current_price) * 100
-    
-    momentum = "Accelerating Momentum" if a > 0 else "Trend Exhaustion"
+def calculate_bollinger_bands(df, window=20, std_dev=2):
+    df['BB_Mid'] = df['Close'].rolling(window=window).mean()
+    df['BB_Std'] = df['Close'].rolling(window=window).std()
+    df['BB_Upper'] = df['BB_Mid'] + (df['BB_Std'] * std_dev)
+    df['BB_Lower'] = df['BB_Mid'] - (df['BB_Std'] * std_dev)
+    return df
 
-    earnings_warning = ""
+def get_ai_narrative(df, poly_coeffs, forecast_days, pred_end, earnings_date):
+    current_price = df['Close'].iloc[-1]
+    upper_band = df['BB_Upper'].iloc[-1]
+    lower_band = df['BB_Lower'].iloc[-1]
+    
+    change_pct = ((pred_end - current_price) / current_price) * 100
+    direction = "BULLISH" if pred_end > current_price else "BEARISH"
+    
+    # Volatility context
+    vol_status = "STRETCHED (Upper Band)" if current_price > upper_band else \
+                 "OVERSOLD (Lower Band)" if current_price < lower_band else "NEUTRAL"
+
+    earnings_alert = ""
     if earnings_date:
-        try:
-            e_date = pd.to_datetime(earnings_date).replace(tzinfo=None)
-            days_to_earnings = (e_date - datetime.now()).days
-            if 0 <= days_to_earnings <= 14:
-                earnings_warning = f"⚠️ **EARNINGS EVENT ALERT:** Scheduled for approx. {days_to_earnings} days. Expect high aftermarket volatility."
-        except:
-            pass
+        e_dt = pd.to_datetime(earnings_date).replace(tzinfo=None)
+        days = (e_dt - datetime.now()).days
+        if 0 <= days <= 14:
+            earnings_alert = f"⚠️ **EARNINGS RISK:** Next report in {days} days. Expect high Aftermarket Gaps."
 
     return f"""
-    ### 🧠 AI Projection Narrative
-    **Horizon:** {forecast_days} Days | **Projected Trend:** <span class="{'status-up' if direction == 'BULLISH' else 'status-down'}">{change_pct:+.2f}%</span>
-    **Curve Analysis:** {momentum} detected via quadratic regression.
+    ### 🤖 AI Market Narrative
+    **Projected Move:** <span class="{'status-up' if direction == 'BULLISH' else 'status-down'}">{change_pct:+.2f}%</span> over {forecast_days} days.  
+    **Volatility Context:** Currently **{vol_status}** relative to Bollinger Bands.  
     
-    {earnings_warning}
+    **Analysis:** The quadratic model plots a {direction.lower()} curve. Combined with recent {vol_status.lower()} positioning, 
+    the model suggests a potential mean-reversion toward the $BB\_Mid$ ($${df['BB_Mid'].iloc[-1]:.2f}).
     
-    *Technical Context: This model evaluates daily closes against aftermarket 'gap' patterns to project the dashed trendline.*
+    {earnings_alert}
     """
 
-# --- Sidebar UI ---
+# --- Sidebar ---
 with st.sidebar:
-    st.header("🏛️ Terminal Settings")
-    ticker_input = st.text_input("Tickers (Comma Separated)", "NVDA, TSLA, AAPL")
-    tickers = [t.strip().upper() for t in ticker_input.split(",")]
+    st.header("⚡ Terminal Config")
+    ticker_str = st.text_input("Tickers (Separated by Commas)", "NVDA, TSLA, SPY")
+    tickers = [t.strip().upper() for t in ticker_str.split(",")]
     
     st.divider()
-    forecast_horizon = st.slider("AI Projection Horizon (Days)", 1, 14, 10)
-    st.caption("Adjust the horizon to see how the quadratic curve extends into future sessions.")
+    horizon = st.slider("Forecast Horizon (Days)", 1, 14, 7)
+    st.info("Bollinger Bands: 20-Day SMA / 2x Std Dev")
 
-# --- Main Dashboard Loop ---
-st.title("Institutional Intelligence Terminal")
-st.subheader("Earnings Proximity & Aftermarket Shift Analysis")
+# --- Main Terminal ---
+st.title("Institutional Multi-Asset Terminal")
 
 for symbol in tickers:
-    # Crucial: fetch_raw_data returns serializable types only
-    df, next_earnings = fetch_raw_data(symbol)
+    df, next_earnings = fetch_serializable_data(symbol)
     
-    if df is not None and len(df) > 30:
-        # 1. Aftermarket Shift Logic (Close to next Open)
+    if df is not None and len(df) > 20:
+        df = calculate_bollinger_bands(df)
         df['Aftermarket_Shift'] = (df['Open'].shift(-1) - df['Close']) / df['Close'] * 100
         
-        # 2. Prediction Math
+        # AI Projection (Quadratic)
         y = df["Close"].values
         x = np.arange(len(y))
-        poly_coeffs = np.polyfit(x, y, 2)
-        future_x = np.arange(len(y), len(y) + forecast_horizon)
-        prediction = np.polyval(poly_coeffs, future_x)
+        coeffs = np.polyfit(x, y, 2)
+        future_x = np.arange(len(y), len(y) + horizon)
+        pred_y = np.polyval(coeffs, future_x)
         
-        pred_dates = [df.index[-1]] + [df.index[-1] + timedelta(days=i+1) for i in range(forecast_horizon)]
-        pred_prices = [df["Close"].iloc[-1]] + list(prediction)
+        pred_dates = [df.index[-1] + timedelta(days=i+1) for i in range(horizon)]
+        # Connect last real price to first prediction
+        plot_dates = [df.index[-1]] + pred_dates
+        plot_prices = [df["Close"].iloc[-1]] + list(pred_y)
 
-        # --- Dashboard Layout ---
-        st.header(f"📈 {symbol} Terminal View")
+        # UI Header & Narrative
+        st.header(f"📊 {symbol} Analysis")
+        narrative = get_ai_narrative(df, coeffs, horizon, plot_prices[-1], next_earnings)
+        st.markdown(f'<div class="report-box">{narrative}</div>', unsafe_allow_html=True)
+
+        # Plotting
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+
+        # Candlesticks
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'), row=1, col=1)
         
-        # Narrative Section
-        report = get_ai_narrative(poly_coeffs, forecast_horizon, df["Close"].iloc[-1], pred_prices[-1], next_earnings)
-        st.markdown(f'<div class="report-box">{report}</div>', unsafe_allow_html=True)
-
-        # Master Plotly Object
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True, 
-            vertical_spacing=0.08, row_heights=[0.7, 0.3],
-            subplot_titles=("Price Action & AI Projection", "Aftermarket Gap Analysis (%)")
-        )
-
-        # Row 1: Candlesticks & AI Dashed Line
-        fig.add_trace(go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'
-        ), row=1, col=1)
+        # Bollinger Bands
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='Upper Band', line=dict(color='rgba(173, 204, 255, 0.3)')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name='Lower Band', line=dict(color='rgba(173, 204, 255, 0.3)'), fill='tonexty'), row=1, col=1)
         
-        fig.add_trace(go.Scatter(
-            x=pred_dates, y=pred_prices, name='AI Forecast', 
-            line=dict(color='#00ffcc', width=4, dash='dashdot')
-        ), row=1, col=1)
+        # AI Prediction
+        fig.add_trace(go.Scatter(x=plot_dates, y=plot_prices, name='AI Forecast', line=dict(color='#00ffcc', width=3, dash='dashdot')), row=1, col=1)
 
-        # Row 2: Aftermarket Gaps (Green for Gap Up, Red for Gap Down)
-        colors = ['#ff4b4b' if val < 0 else '#00ffcc' for val in df['Aftermarket_Shift']]
-        fig.add_trace(go.Bar(
-            x=df.index, y=df['Aftermarket_Shift'], name='Gap %', marker_color=colors
-        ), row=2, col=1)
+        # Aftermarket Gaps
+        gap_colors = ['#ff4b4b' if g < 0 else '#00ffcc' for g in df['Aftermarket_Shift']]
+        fig.add_trace(go.Bar(x=df.index, y=df['Aftermarket_Shift'], name='Gap %', marker_color=gap_colors), row=2, col=1)
 
-        # UI Refinements
-        fig.update_layout(
-            template="plotly_dark", height=800, 
-            xaxis_rangeslider_visible=False, 
-            hovermode="x unified",
-            margin=dict(l=0, r=0, t=50, b=0)
-        )
-        
-        # Add Timeframe Selectors
-        fig.update_xaxes(
-            rangeslider_visible=True,
-            rangeselector=dict(
-                buttons=list([
-                    dict(count=1, label="1M", step="month", stepmode="backward"),
-                    dict(count=6, label="6M", step="month", stepmode="backward"),
-                    dict(step="all")
-                ]),
-                bgcolor="#161b22"
-            ),
-            row=2, col=1
-        )
-
+        fig.update_layout(template="plotly_dark", height=850, xaxis_rangeslider_visible=False, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
         st.divider()
     else:
-        st.error(f"Ticker {symbol}: Data inaccessible or insufficient history.")
+        st.warning(f"Insufficient data for {symbol}.")
 
 
