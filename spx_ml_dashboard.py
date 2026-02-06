@@ -7,7 +7,7 @@ from sklearn.ensemble import RandomForestRegressor
 from datetime import datetime, timedelta
 
 # --- Page Config ---
-st.set_page_config(layout="wide", page_title="AI Alpha Terminal v7.1", page_icon="🏛️")
+st.set_page_config(layout="wide", page_title="AI Alpha Terminal v7.2", page_icon="🏛️")
 
 # --- Global Sidebar ---
 with st.sidebar:
@@ -16,20 +16,21 @@ with st.sidebar:
     forecast_days = st.slider("Forecast Horizon (Days)", 1, 10, 5)
     
     st.divider()
-    st.caption("v7.1: Regime-Adaptive Volatility Filtering")
-    # NEW CONTROL: The "Safety Switch"
+    st.caption("v7.2: Custom Date Range Walk-Forward")
+    # THE SAFETY SWITCH
     vol_threshold = st.slider("Volatility Safety Cutoff (%)", 50, 100, 85, 
-                              help="If market volatility is in the top X% percentile, the AI will go to Cash (Safety).")
+                              help="If market volatility is in the top X% percentile, the AI will go to Cash.")
 
 # --- Core Processing Logic ---
 @st.cache_data(ttl=3600)
 def get_data_with_lags(ticker, horizon=5):
+    # Fetch 10y to ensure we have enough "Pre-Start" data for training
     df = yf.download(ticker, period="10y", interval="1d")
     if df.empty: return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # 1. Feature Engineering
+    # Feature Engineering
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['Vol_10'] = df['Log_Ret'].rolling(10).std()
     
@@ -55,7 +56,6 @@ def train_model(df):
     X = df[features].values
     y = df['Target'].values * 100
     
-    # Reduced depth to prevent overfitting on noise
     model = RandomForestRegressor(n_estimators=150, max_depth=7, min_samples_leaf=10, random_state=42)
     model.fit(X, y)
     return model, features
@@ -63,7 +63,7 @@ def train_model(df):
 data = get_data_with_lags(ticker, horizon=forecast_days)
 
 if data is not None:
-    tab_live, tab_audit = st.tabs(["⚡ Live Prediction", "🧪 Walk-Forward Lab"])
+    tab_live, tab_audit = st.tabs(["⚡ Live Prediction", "🧪 Range-Based Walk-Forward"])
 
     # --- TAB 1: LIVE TERMINAL ---
     with tab_live:
@@ -81,7 +81,7 @@ if data is not None:
         # Display Logic
         if not is_safe:
             status = "CASH (High Volatility)"
-            color = "#ff4b4b" # Red
+            color = "#ff4b4b"
             advice = "Market is too erratic. Strategy is in safety mode."
         else:
             status = "BULLISH" if pred_return > 0.5 else "BEARISH" if pred_return < -0.5 else "NEUTRAL"
@@ -108,94 +108,119 @@ if data is not None:
             st.progress(min(current_vol/vol_cutoff, 1.0))
             st.caption("Bar Full = DANGER ZONE")
 
-    # --- TAB 2: REGIME-ADAPTIVE WALK-FORWARD ---
+    # --- TAB 2: RANGE-BASED WALK-FORWARD ---
     with tab_audit:
-        st.subheader("🧪 Regime-Adaptive Walk-Forward")
-        st.markdown(f"**The Fix:** This simulation calculates the **{vol_threshold}th Percentile** of volatility. If the market exceeds this, the AI goes to CASH (0% return) to avoid crashes.")
+        st.subheader("🧪 Targeted Era Stress Test")
+        st.markdown(f"**Instructions:** Select a Start and End date. The AI will simulate trading through that specific window, re-training itself every week.")
         
-        if st.button("🚀 Run Adaptive Simulation"):
-            # Set up simulation
-            start_date = data.index.max() - timedelta(days=730) # Last 2 years
-            sim_data = data[data.index >= start_date].copy()
-            
-            dates = []
-            strat_equity = [10000]
-            market_equity = [10000]
-            
-            # Pre-calculate Volatility Cutoff based on "Past" data only
-            # In a real engine, this would update dynamically, but fixed is okay for demo
-            initial_train = data[data.index < start_date]
-            dynamic_cutoff = initial_train['Vol_10'].quantile(vol_threshold/100)
-            
-            progress = st.progress(0)
-            step_size = 5 # Weekly re-balance
-            
-            for i in range(0, len(sim_data) - step_size, step_size):
-                curr_date = sim_data.index[i]
-                
-                # 1. Train on PAST
-                train_sub = data[data.index < curr_date]
-                m, feats = train_model(train_sub)
-                
-                # 2. Check Regime
-                curr_vol = sim_data.iloc[i]['Vol_10']
-                
-                # 3. Predict
-                if curr_vol > dynamic_cutoff:
-                    # REGIME FILTER ACTIVATED -> GO TO CASH
-                    realized_return = 0.0 
-                    action = "CASH"
-                else:
-                    # REGIME SAFE -> TAKE THE TRADE
-                    X_test = sim_data.iloc[i][feats].values.reshape(1, -1)
-                    pred = m.predict(X_test)[0]
-                    
-                    # Actual market move over next step_size days
-                    # Note: We use the 'Target' (future return) from the data
-                    actual_move = sim_data.iloc[i]['Target'] * 100
-                    
-                    # If model says UP and pred > 0, we get the return. 
-                    # If model says DOWN and pred < 0, we get 0 (or short). 
-                    # Let's assume Long-Only for simplicity:
-                    if pred > 0:
-                        realized_return = actual_move
-                        action = "BUY"
-                    else:
-                        realized_return = 0.0 # Stay in cash
-                        action = "WAIT"
+        # DATE RANGE SELECTORS
+        min_date = data.index.min().date()
+        max_date = data.index.max().date()
+        
+        c_sel1, c_sel2 = st.columns(2)
+        
+        # Start Date (Must have at least 1 year of data before it for training)
+        audit_start = c_sel1.date_input("Simulation Start Date", 
+                                       value=max_date - timedelta(days=365),
+                                       min_value=min_date + timedelta(days=365),
+                                       max_value=max_date - timedelta(days=30))
+        
+        # End Date
+        audit_end = c_sel2.date_input("Simulation End Date", 
+                                      value=max_date,
+                                      min_value=audit_start + timedelta(days=7),
+                                      max_value=max_date)
 
-                # Update Equity
-                new_strat = strat_equity[-1] * (1 + realized_return/100)
-                strat_equity.append(new_strat)
+        if st.button("🚀 Run Range Simulation"):
+            # Filter Data to the specific window
+            t_start = pd.Timestamp(audit_start)
+            t_end = pd.Timestamp(audit_end)
+            
+            # The 'sim_data' is the future path we are walking through
+            sim_data = data[(data.index >= t_start) & (data.index <= t_end)].copy()
+            
+            if len(sim_data) > 10:
+                dates = []
+                strat_equity = [10000]
+                market_equity = [10000]
                 
-                # Update Market (Buy & Hold)
-                mkt_move = sim_data.iloc[i]['Target'] * 100
-                new_mkt = market_equity[-1] * (1 + mkt_move/100)
-                market_equity.append(new_mkt)
+                # Dynamic Volatility Cutoff Setup
+                # We calculate the cutoff based on data BEFORE the simulation starts
+                pre_sim_data = data[data.index < t_start]
+                dynamic_cutoff = pre_sim_data['Vol_10'].quantile(vol_threshold/100)
                 
-                dates.append(curr_date)
-                progress.progress(min((i + step_size) / len(sim_data), 1.0))
-            
-            # Plotting
-            fig_res = go.Figure()
-            # Align dates (we have 1 more equity point than dates, so slice)
-            plot_dates = dates 
-            
-            fig_res.add_trace(go.Scatter(x=plot_dates, y=strat_equity[1:], name="AI (Adaptive)", line=dict(color='#00ffcc', width=2)))
-            fig_res.add_trace(go.Scatter(x=plot_dates, y=market_equity[1:], name="Buy & Hold", line=dict(color='gray', dash='dash')))
-            fig_res.update_layout(template="plotly_dark", title=f"Performance: Adaptive AI vs Market (Vol Cutoff: {vol_threshold}%)")
-            st.plotly_chart(fig_res, use_container_width=True)
-            
-            # Statistics
-            strat_ret = (strat_equity[-1] - 10000) / 100
-            mkt_ret = (market_equity[-1] - 10000) / 100
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Adaptive Strategy Return", f"{strat_ret:.1f}%")
-            c2.metric("Buy & Hold Return", f"{mkt_ret:.1f}%")
-            c3.metric("Alpha (Edge)", f"{strat_ret - mkt_ret:.1f}%", delta_color="normal")
-            
-            if strat_ret > mkt_ret:
-                st.success("✅ The Volatility Filter worked! By sitting out the 'crash days', the AI preserved capital and outperformed.")
+                progress = st.progress(0)
+                step_size = 5 # Weekly re-balance
+                
+                # WALK-FORWARD LOOP
+                for i in range(0, len(sim_data) - step_size, step_size):
+                    curr_date = sim_data.index[i]
+                    
+                    # 1. Train on PAST (Everything before current simulation step)
+                    train_sub = data[data.index < curr_date]
+                    m, feats = train_model(train_sub)
+                    
+                    # 2. Check Regime (Volatility Safety)
+                    curr_vol = sim_data.iloc[i]['Vol_10']
+                    
+                    # 3. Predict or Defend
+                    if curr_vol > dynamic_cutoff:
+                        # Safety Mode
+                        realized_return = 0.0 
+                        action = "CASH"
+                    else:
+                        # Active Mode
+                        X_test = sim_data.iloc[i][feats].values.reshape(1, -1)
+                        pred = m.predict(X_test)[0]
+                        
+                        actual_move = sim_data.iloc[i]['Target'] * 100
+                        
+                        # Strategy: Long Only (Buy if > 0)
+                        if pred > 0:
+                            realized_return = actual_move
+                            action = "BUY"
+                        else:
+                            realized_return = 0.0
+                            action = "WAIT"
+
+                    # Update Account
+                    new_strat = strat_equity[-1] * (1 + realized_return/100)
+                    strat_equity.append(new_strat)
+                    
+                    mkt_move = sim_data.iloc[i]['Target'] * 100
+                    new_mkt = market_equity[-1] * (1 + mkt_move/100)
+                    market_equity.append(new_mkt)
+                    
+                    dates.append(curr_date)
+                    progress.progress(min((i + step_size) / len(sim_data), 1.0))
+                
+                # Results Visualization
+                st.divider()
+                
+                # Calculate final stats
+                final_strat = strat_equity[-1]
+                final_mkt = market_equity[-1]
+                strat_ret = (final_strat - 10000) / 100
+                mkt_ret = (final_mkt - 10000) / 100
+                
+                c_res1, c_res2, c_res3 = st.columns(3)
+                c_res1.metric("Strategy Return", f"{strat_ret:.1f}%", f"${final_strat:,.0f}")
+                c_res2.metric("Market Return", f"{mkt_ret:.1f}%", f"${final_mkt:,.0f}")
+                c_res3.metric("Edge (Alpha)", f"{strat_ret - mkt_ret:.1f}%", delta_color="normal")
+
+                fig_res = go.Figure()
+                plot_dates = dates
+                fig_res.add_trace(go.Scatter(x=plot_dates, y=strat_equity[1:], name="AI (Adaptive)", line=dict(color='#00ffcc', width=2)))
+                fig_res.add_trace(go.Scatter(x=plot_dates, y=market_equity[1:], name="Buy & Hold", line=dict(color='gray', dash='dash')))
+                fig_res.update_layout(template="plotly_dark", title=f"Performance: {audit_start} to {audit_end}", height=500)
+                st.plotly_chart(fig_res, use_container_width=True)
+                
+                if strat_ret > mkt_ret:
+                    st.success(f"✅ The Strategy beat the market by {strat_ret - mkt_ret:.1f}% during this period.")
+                else:
+                    st.warning(f"⚠️ The Strategy trailed the market. The volatility filter may have been too aggressive.")
             else:
-                st.info("The market was steady. The filter may have been too sensitive, causing missed opportunities.")
+                st.error("Selected range is too short. Please select at least 2 weeks.")
+else:
+    st.error("Invalid Ticker or insufficient data.")
+
